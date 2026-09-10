@@ -26,7 +26,19 @@ type LogRow = {
 
 type LogsResponse = { engine: string; logs: LogRow[] };
 
+type CandlePayload = {
+  open_time: number;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+  close_time: number;
+};
+
 const timeframes = ["1m", "5m", "15m", "1h", "4h", "1d"];
+const MARKET_API = "https://data-api.binance.vision";
+const HISTORY_LIMIT = 500;
 
 function localDateValue(date: Date) {
   const year = date.getFullYear();
@@ -79,9 +91,31 @@ export default function EngineWorkingLogPage() {
     setRunning(true);
     setError(null);
     try {
-      const response = await fetch(`/api/indicators/run/${normalized}?timeframe=${timeframe}&limit=500`, {
+      const marketResponse = await fetch(
+        `${MARKET_API}/api/v3/klines?symbol=${encodeURIComponent(normalized)}&interval=${encodeURIComponent(timeframe)}&limit=${HISTORY_LIMIT}`,
+        { cache: "no-store" },
+      );
+      if (!marketResponse.ok) {
+        const body = await marketResponse.json().catch(() => ({}));
+        throw new Error(body.msg ?? "Unable to load Binance candle history in browser");
+      }
+
+      const rows = (await marketResponse.json()) as (string | number)[][];
+      const candles: CandlePayload[] = rows.map((row) => ({
+        open_time: Number(row[0]),
+        open: String(row[1]),
+        high: String(row[2]),
+        low: String(row[3]),
+        close: String(row[4]),
+        volume: String(row[5]),
+        close_time: Number(row[6]),
+      }));
+
+      const response = await fetch(`/api/indicators/run/${normalized}?timeframe=${timeframe}&limit=${HISTORY_LIMIT}`, {
         method: "POST",
         cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(candles),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
@@ -148,7 +182,7 @@ export default function EngineWorkingLogPage() {
           <label style={{ fontSize: 11, color: "#8f9bb0" }}>Test Symbol<br /><input value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} style={inputStyle} /></label>
           <label style={{ fontSize: 11, color: "#8f9bb0" }}>Timeframe<br /><select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} style={inputStyle}>{timeframes.map((item) => <option key={item}>{item}</option>)}</select></label>
           <button type="button" onClick={runEngine} disabled={running} style={runButtonStyle}>{running ? "Running…" : "Run Indicator Engine"}</button>
-          <span className="muted">Each run calculates EMA 9/20/21/50/200, RSI 14, MACD 12/26/9 and volume metrics.</span>
+          <span className="muted">Browser loads Binance candles; backend calculates EMA 9/20/21/50/200, RSI 14, MACD 12/26/9 and volume metrics.</span>
         </div>
         {error && <p className="negative" style={{ marginBottom: 0 }}>{error}</p>}
       </section>
