@@ -40,7 +40,9 @@ export default function StrategySignalPage(){
         fetch("/api/scanner/worker/status",{cache:"no-store"})
       ]);
       if(!lr.ok||!wr.ok)throw new Error("Unable to load Scanner Top30");
-      setLogs((await lr.json() as LogsResponse).logs??[]);
+      const fresh=(await lr.json() as LogsResponse).logs??[];
+      if(fresh.length){setLogs(fresh);window.localStorage.setItem("rakib-scanner-latest",JSON.stringify(fresh[0]))}
+      else{const cached=window.localStorage.getItem("rakib-scanner-latest");if(cached){try{setLogs([JSON.parse(cached) as ScannerRun])}catch{setLogs([])}}else setLogs([])}
       setWorker(await wr.json() as WorkerStatus);
       setError(null);
     }catch(e){
@@ -49,6 +51,8 @@ export default function StrategySignalPage(){
   },[]);
 
   useEffect(()=>{
+    const cached=window.localStorage.getItem("rakib-scanner-latest");
+    if(cached){try{setLogs([JSON.parse(cached) as ScannerRun])}catch{}}
     void load();
     const id=window.setInterval(()=>void load(),15000);
     return()=>window.clearInterval(id);
