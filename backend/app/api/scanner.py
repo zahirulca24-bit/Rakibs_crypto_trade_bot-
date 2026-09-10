@@ -2,6 +2,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
+from app.services.scanner_worker import scanner_worker
 from app.strategies.scanner_engine import (
     DEFAULT_MIN_VOLUME_RATIO,
     ScannerEngine,
@@ -39,3 +40,8 @@ def run_scanner(
 @router.get("/logs")
 def scanner_logs():
     return {"engine": "Scanner Engine", "logs": get_scanner_logs()}
+
+
+@router.get("/worker/status")
+def scanner_worker_status():
+    return scanner_worker.status()
