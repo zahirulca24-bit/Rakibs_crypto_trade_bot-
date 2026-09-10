@@ -1,8 +1,8 @@
 from typing import Any
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
-from app.strategies.scanner_engine import ScannerEngine, get_scanner_logs
+from app.strategies.scanner_engine import ScannerEngine, SUPPORTED_TIMEFRAMES, get_scanner_logs
 
 router = APIRouter(prefix="/api/scanner", tags=["scanner"])
 engine = ScannerEngine()
@@ -14,7 +14,15 @@ def run_scanner(
     timeframe: str = Query(default="15m"),
     min_quote_volume: float = Query(default=10_000_000, ge=0),
 ):
-    return engine.scan(markets, timeframe=timeframe, min_quote_volume=min_quote_volume)
+    if timeframe not in SUPPORTED_TIMEFRAMES:
+        raise HTTPException(status_code=422, detail=f"Unsupported timeframe: {timeframe}")
+    if not markets:
+        raise HTTPException(status_code=422, detail="Scanner requires at least one market")
+
+    try:
+        return engine.scan(markets, timeframe=timeframe, min_quote_volume=min_quote_volume)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/logs")
