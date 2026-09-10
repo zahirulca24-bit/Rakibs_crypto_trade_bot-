@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from time import perf_counter
+from time import perf_counter, time
 from typing import Any
 
 from app.strategies.indicator_engine import _ema, _rsi
 
 MAX_SCANNER_LOGS = 2000
 SCANNER_LOGS: list[dict[str, Any]] = []
+SUPPORTED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
+MIN_CLOSED_CANDLES = 200
+MIN_VOLUME_RATIO = 1.5
+MIN_CANDIDATE_SCORE = 50
 
 
 def _score_candidate(metrics: dict[str, float]) -> tuple[int, list[str]]:
@@ -29,33 +33,80 @@ def _score_candidate(metrics: dict[str, float]) -> tuple[int, list[str]]:
     if metrics["macd"] > metrics["macd_signal"]:
         score += 15
         reasons.append("MACD above signal")
-    if metrics["volume_ratio"] >= 1.5:
+    if metrics["volume_ratio"] >= MIN_VOLUME_RATIO:
         score += 15
         reasons.append("Volume expansion >= 1.5x")
 
     return score, reasons
 
 
+def _closed_candles(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return candles that are already closed, ordered oldest -> newest.
+
+    Binance REST normally includes the currently-forming candle as the final row.
+    Scanner decisions must use closed candles only so repeated runs are stable.
+    """
+    now_ms = int(time() * 1000)
+    normalized: list[dict[str, Any]] = []
+    for candle in candles:
+        try:
+            close_time = int(candle.get("close_time", 0))
+            float(candle["close"])
+            float(candle["volume"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if close_time and close_time <= now_ms:
+            normalized.append(candle)
+
+    normalized.sort(key=lambda item: int(item.get("open_time", 0)))
+    return normalized
+
+
 class ScannerEngine:
-    def scan(self, markets: list[dict[str, Any]], timeframe: str = "15m", min_quote_volume: float = 10_000_000) -> dict[str, Any]:
+    def scan(
+        self,
+        markets: list[dict[str, Any]],
+        timeframe: str = "15m",
+        min_quote_volume: float = 10_000_000,
+    ) -> dict[str, Any]:
+        if timeframe not in SUPPORTED_TIMEFRAMES:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+        if min_quote_volume < 0:
+            raise ValueError("min_quote_volume must be non-negative")
+
         started = perf_counter()
         timestamp = datetime.now(timezone.utc).isoformat()
         candidates: list[dict[str, Any]] = []
         evaluated = 0
+        skipped_liquidity = 0
+        skipped_candles = 0
+        skipped_volume = 0
+        invalid_markets = 0
+        seen_symbols: set[str] = set()
 
         for market in markets:
             try:
                 symbol = str(market["symbol"]).replace("/", "").replace("-", "").upper()
+                if not symbol or symbol in seen_symbols:
+                    continue
+                seen_symbols.add(symbol)
+
                 quote_volume = float(market.get("quote_volume", 0))
                 if quote_volume < min_quote_volume:
+                    skipped_liquidity += 1
                     continue
 
-                candles = market.get("candles") or []
-                if len(candles) < 200:
+                candles = _closed_candles(market.get("candles") or [])
+                if len(candles) < MIN_CLOSED_CANDLES:
+                    skipped_candles += 1
                     continue
 
                 closes = [float(item["close"]) for item in candles]
                 volumes = [float(item["volume"]) for item in candles]
+                if len(volumes) < 21:
+                    skipped_candles += 1
+                    continue
+
                 ema_9 = _ema(closes, 9)[-1]
                 ema_21 = _ema(closes, 21)[-1]
                 ema_50 = _ema(closes, 50)[-1]
@@ -64,9 +115,17 @@ class ScannerEngine:
                 ema26 = _ema(closes, 26)
                 macd_values = [a - b for a, b in zip(ema12, ema26)]
                 macd_signal_values = _ema(macd_values, 9)
+
                 current_volume = volumes[-1]
-                avg_volume_20 = sum(volumes[-20:]) / 20
-                volume_ratio = current_volume / avg_volume_20 if avg_volume_20 else 0.0
+                previous_20 = volumes[-21:-1]
+                avg_volume_20 = sum(previous_20) / len(previous_20)
+                volume_ratio = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0.0
+                evaluated += 1
+
+                # Volume expansion is an eligibility rule, not just a scoring bonus.
+                if volume_ratio < MIN_VOLUME_RATIO:
+                    skipped_volume += 1
+                    continue
 
                 metrics = {
                     "close": closes[-1],
@@ -80,38 +139,46 @@ class ScannerEngine:
                     "volume_ratio": volume_ratio,
                 }
                 score, reasons = _score_candidate(metrics)
-                evaluated += 1
 
-                if score >= 50:
-                    candidates.append({
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "score": score,
-                        "quote_volume": round(quote_volume, 2),
-                        "last_price": round(metrics["close"], 8),
-                        "rsi_14": round(metrics["rsi_14"], 2),
-                        "macd": round(metrics["macd"], 8),
-                        "macd_signal": round(metrics["macd_signal"], 8),
-                        "volume_ratio": round(volume_ratio, 2),
-                        "ema_9": round(ema_9, 8),
-                        "ema_21": round(ema_21, 8),
-                        "ema_50": round(ema_50, 8),
-                        "ema_200": round(ema_200, 8),
-                        "reasons": reasons,
-                    })
-            except (KeyError, TypeError, ValueError):
+                if score >= MIN_CANDIDATE_SCORE:
+                    candidates.append(
+                        {
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "score": score,
+                            "quote_volume": round(quote_volume, 2),
+                            "last_price": round(metrics["close"], 8),
+                            "rsi_14": round(metrics["rsi_14"], 2),
+                            "macd": round(metrics["macd"], 8),
+                            "macd_signal": round(metrics["macd_signal"], 8),
+                            "volume_ratio": round(volume_ratio, 2),
+                            "ema_9": round(ema_9, 8),
+                            "ema_21": round(ema_21, 8),
+                            "ema_50": round(ema_50, 8),
+                            "ema_200": round(ema_200, 8),
+                            "reasons": reasons,
+                        }
+                    )
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                invalid_markets += 1
                 continue
 
-        candidates.sort(key=lambda item: (item["score"], item["quote_volume"]), reverse=True)
+        candidates.sort(key=lambda item: (item["score"], item["volume_ratio"], item["quote_volume"]), reverse=True)
         result = {
             "timestamp": timestamp,
             "engine": "Scanner Engine",
             "status": "success",
             "timeframe": timeframe,
             "min_quote_volume": min_quote_volume,
+            "min_volume_ratio": MIN_VOLUME_RATIO,
+            "min_candidate_score": MIN_CANDIDATE_SCORE,
             "input_markets": len(markets),
             "evaluated_markets": evaluated,
             "candidate_count": len(candidates),
+            "skipped_liquidity": skipped_liquidity,
+            "skipped_candles": skipped_candles,
+            "skipped_volume": skipped_volume,
+            "invalid_markets": invalid_markets,
             "processing_ms": round((perf_counter() - started) * 1000, 2),
             "candidates": candidates,
         }
