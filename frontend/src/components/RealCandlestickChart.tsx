@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CandlestickSeries,
   ColorType,
@@ -30,6 +30,9 @@ type Props = {
 
 type NumericPoint = { time: Time; value: number };
 type MacdPoint = NumericPoint & { histogram: number };
+type EmaPeriod = 9 | 20 | 21 | 50 | 200;
+
+const EMA_PERIODS: EmaPeriod[] = [9, 20, 21, 50, 200];
 
 const chartBaseOptions = {
   autoSize: true,
@@ -99,6 +102,16 @@ function formatValue(value: number | undefined, digits = 2) {
   return value.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
+const indicatorButtonStyle = (active: boolean) => ({
+  border: `1px solid ${active ? "#4f6b8a" : "#263242"}`,
+  background: active ? "#162231" : "#0b1118",
+  color: active ? "#e6edf6" : "#75869a",
+  borderRadius: 6,
+  padding: "5px 9px",
+  fontSize: 11,
+  cursor: "pointer",
+});
+
 export default function RealCandlestickChart({ candles }: Props) {
   const priceContainerRef = useRef<HTMLDivElement | null>(null);
   const rsiContainerRef = useRef<HTMLDivElement | null>(null);
@@ -115,11 +128,20 @@ export default function RealCandlestickChart({ candles }: Props) {
   const signalSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const histogramSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
 
+  const [showRsi, setShowRsi] = useState(true);
+  const [showMacd, setShowMacd] = useState(true);
+  const [visibleEmas, setVisibleEmas] = useState<Record<EmaPeriod, boolean>>({
+    9: true,
+    20: true,
+    21: true,
+    50: true,
+    200: true,
+  });
+
   const indicators = useMemo(() => {
     const closes = candles.map((candle) => Number(candle.close));
     const times = candles.map((candle) => Math.floor(candle.open_time / 1000) as Time);
-    const periods = [9, 21, 20, 50, 200];
-    const emas = Object.fromEntries(periods.map((period) => [period, ema(closes, period)])) as Record<number, number[]>;
+    const emas = Object.fromEntries(EMA_PERIODS.map((period) => [period, ema(closes, period)])) as Record<number, number[]>;
 
     const rsiValues = rsi(closes, 14);
     const ema12 = ema(closes, 12);
@@ -165,8 +187,8 @@ export default function RealCandlestickChart({ candles }: Props) {
 
     const emaConfig = [
       [9, "#f6c85f", 2],
-      [21, "#7f9cf5", 2],
       [20, "#56cfe1", 1],
+      [21, "#7f9cf5", 2],
       [50, "#c084fc", 2],
       [200, "#f97316", 2],
     ] as const;
@@ -221,16 +243,16 @@ export default function RealCandlestickChart({ candles }: Props) {
     histogramSeriesRef.current = histogramSeries;
 
     let syncing = false;
-    const syncRange = (source: IChartApi, targets: IChartApi[]) => (range: LogicalRange | null) => {
+    const syncRange = (targets: IChartApi[]) => (range: LogicalRange | null) => {
       if (!range || syncing) return;
       syncing = true;
       for (const target of targets) target.timeScale().setVisibleLogicalRange(range);
       syncing = false;
     };
 
-    const priceSync = syncRange(priceChart, [rsiChart, macdChart]);
-    const rsiSync = syncRange(rsiChart, [priceChart, macdChart]);
-    const macdSync = syncRange(macdChart, [priceChart, rsiChart]);
+    const priceSync = syncRange([rsiChart, macdChart]);
+    const rsiSync = syncRange([priceChart, macdChart]);
+    const macdSync = syncRange([priceChart, rsiChart]);
     priceChart.timeScale().subscribeVisibleLogicalRangeChange(priceSync);
     rsiChart.timeScale().subscribeVisibleLogicalRangeChange(rsiSync);
     macdChart.timeScale().subscribeVisibleLogicalRangeChange(macdSync);
@@ -252,6 +274,12 @@ export default function RealCandlestickChart({ candles }: Props) {
   }, []);
 
   useEffect(() => {
+    for (const period of EMA_PERIODS) {
+      emaSeriesRefs.current[period]?.applyOptions({ visible: visibleEmas[period] });
+    }
+  }, [visibleEmas]);
+
+  useEffect(() => {
     const candleSeries = candleSeriesRef.current;
     if (!candleSeries) return;
 
@@ -264,7 +292,7 @@ export default function RealCandlestickChart({ candles }: Props) {
     }));
     candleSeries.setData(candleData);
 
-    for (const period of [9, 21, 20, 50, 200]) {
+    for (const period of EMA_PERIODS) {
       const series = emaSeriesRefs.current[period];
       if (!series) continue;
       const data: LineData<Time>[] = indicators.times.map((time, index) => ({
@@ -298,15 +326,42 @@ export default function RealCandlestickChart({ candles }: Props) {
     }
   }, [candles, indicators]);
 
+  useEffect(() => {
+    window.setTimeout(() => {
+      priceChartRef.current?.timeScale().fitContent();
+      if (showRsi) rsiChartRef.current?.timeScale().fitContent();
+      if (showMacd) macdChartRef.current?.timeScale().fitContent();
+    }, 0);
+  }, [showRsi, showMacd]);
+
   const lastIndex = candles.length - 1;
   const latestRsi = lastIndex >= 0 ? indicators.rsiValues[lastIndex] ?? undefined : undefined;
   const latestMacd = lastIndex >= 0 ? indicators.macd[lastIndex] : undefined;
   const latestSignal = lastIndex >= 0 ? indicators.signal[lastIndex] : undefined;
 
+  const toggleEma = (period: EmaPeriod) => {
+    setVisibleEmas((current) => ({ ...current, [period]: !current[period] }));
+  };
+
   return (
     <div style={{ width: "100%", background: "#0b1118" }}>
-      <div style={{ padding: "8px 12px", borderBottom: "1px solid #1c2734", display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11 }}>
-        {[9, 21, 20, 50, 200].map((period) => (
+      <div style={{ padding: "8px 12px", borderBottom: "1px solid #1c2734", display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
+        <strong style={{ fontSize: 11, color: "#dfe7f1", marginRight: 4 }}>Indicators</strong>
+        {EMA_PERIODS.map((period) => (
+          <button key={period} type="button" onClick={() => toggleEma(period)} style={indicatorButtonStyle(visibleEmas[period])}>
+            EMA {period}
+          </button>
+        ))}
+        <button type="button" onClick={() => setShowRsi((value) => !value)} style={indicatorButtonStyle(showRsi)}>
+          RSI 14
+        </button>
+        <button type="button" onClick={() => setShowMacd((value) => !value)} style={indicatorButtonStyle(showMacd)}>
+          MACD 12·26·9
+        </button>
+      </div>
+
+      <div style={{ padding: "7px 12px", borderBottom: "1px solid #1c2734", display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11 }}>
+        {EMA_PERIODS.filter((period) => visibleEmas[period]).map((period) => (
           <span key={period} style={{ color: "#9cafc3" }}>
             EMA {period} <strong>{formatValue(indicators.emas[period]?.[lastIndex])}</strong>
           </span>
@@ -315,7 +370,7 @@ export default function RealCandlestickChart({ candles }: Props) {
 
       <div ref={priceContainerRef} style={{ width: "100%", height: 430 }} />
 
-      <div style={{ borderTop: "1px solid #1c2734" }}>
+      <div style={{ borderTop: "1px solid #1c2734", display: showRsi ? "block" : "none" }}>
         <div style={{ padding: "6px 12px", fontSize: 11, color: "#9cafc3", display: "flex", gap: 12 }}>
           <strong style={{ color: "#dfe7f1" }}>RSI (14)</strong>
           <span>{formatValue(latestRsi)}</span>
@@ -324,7 +379,7 @@ export default function RealCandlestickChart({ candles }: Props) {
         <div ref={rsiContainerRef} style={{ width: "100%", height: 150 }} />
       </div>
 
-      <div style={{ borderTop: "1px solid #1c2734", position: "relative" }}>
+      <div style={{ borderTop: "1px solid #1c2734", position: "relative", display: showMacd ? "block" : "none" }}>
         <div style={{ padding: "6px 12px", fontSize: 11, color: "#9cafc3", display: "flex", gap: 12, flexWrap: "wrap" }}>
           <strong style={{ color: "#dfe7f1" }}>MACD (12, 26, 9)</strong>
           <span>MACD {formatValue(latestMacd, 4)}</span>
