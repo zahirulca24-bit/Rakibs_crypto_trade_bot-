@@ -8,7 +8,8 @@ from typing import Any
 
 import httpx
 
-from app.strategies.scanner_engine import MIN_QUOTE_VOLUME, SCAN_POOL_LIMIT, TOP_LIMIT, ScannerEngine
+from app.strategies.scanner_engine import MIN_QUOTE_VOLUME, SCAN_POOL_LIMIT, TOP_LIMIT, ScannerEngine, restore_scanner_result
+from app.services.state_store import ensure_state_schema, load_scanner_result, save_scanner_result
 
 FUTURES_API = "https://fapi.binance.com"
 LOOP_TICK_SECONDS = 30
@@ -74,6 +75,33 @@ class FuturesScannerWorker:
         self._participation_rows: list[dict[str, Any]] = []
         self._top_rows: list[dict[str, Any]] = []
         self._last_hour_slot = -1
+
+    async def restore_persisted_state(self) -> None:
+        try:
+            ready = await asyncio.to_thread(ensure_state_schema)
+            if not ready:
+                return
+            result = await asyncio.to_thread(load_scanner_result)
+            if not result:
+                return
+            restore_scanner_result(result)
+            self.last_candidate_count = int(result.get("candidate_count", 0))
+            self.last_long_candidates = int(result.get("long_candidates", 0))
+            self.last_short_candidates = int(result.get("short_candidates", 0))
+            pipeline = result.get("pipeline") or {}
+            self.last_scan_pool = int((pipeline.get("scan_pool") or {}).get("passed", 0))
+            self.last_trend_passed = int((pipeline.get("trend_1h") or {}).get("passed", 0))
+            self.last_top30 = int((pipeline.get("top_30") or {}).get("passed", 0))
+            self.run_count = 1
+            self.last_layer = "restored 1H Top30"
+            ts = str(result.get("timestamp", ""))
+            try:
+                restored = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                self._last_hour_slot = int(restored.timestamp() * 1000) // ONE_HOUR_MS
+            except Exception:
+                self._last_hour_slot = -1
+        except Exception as exc:
+            self.last_error = f"state restore failed: {exc}"
 
     async def start(self) -> None:
         if self.task and not self.task.done():
@@ -310,6 +338,10 @@ class FuturesScannerWorker:
             self.run_count += 1
             self.last_layer = "1H scan complete · Top30 locked"
             self._last_hour_slot = _hour_slot()
+            try:
+                await asyncio.to_thread(save_scanner_result, result)
+            except Exception as exc:
+                self.last_error = f"state save failed: {exc}"
             return result
         except Exception as exc:
             self.last_error = str(exc)
