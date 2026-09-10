@@ -7,6 +7,9 @@ type Candidate={symbol:string;side:"LONG"|"SHORT";score:number;quote_volume:numb
 type StageDiag={passed:number;dropped:number;passed_symbols:string[];dropped_symbols:string[]};
 type ScannerRun={timestamp:string;engine:string;version?:string;status:string;candidate_count:number;long_candidates:number;short_candidates:number;processing_ms:number;pipeline?:{scan_pool?:StageDiag;trend_1h?:StageDiag;participation?:StageDiag;top_30?:StageDiag};candidates:Candidate[]};
 type WorkerStatus={running:boolean;interval_seconds:number;architecture?:string;schedule?:{scanner:string};scan_pool_limit:number;top_limit:number;min_quote_volume:number;last_started_at?:string|null;last_finished_at?:string|null;last_error?:string|null;last_candidate_count:number;last_long_candidates:number;last_short_candidates:number;last_scan_pool:number;last_trend_passed:number;last_top30:number;last_layer?:string;rate_limited?:boolean;retry_in_seconds?:number;next_scan_in_seconds?:number;run_count:number};
+type StrategyRow={symbol:string;side:"LONG"|"SHORT";status:"PASS"|"HOLD";score:number;scanner_score?:number;rsi_15m?:number;macd_histogram_15m?:number;rvol_15m?:number;atr_pct_15m?:number;reasons?:string[];hold_reasons?:string[]};
+type StrategyRun={timestamp:string;engine:string;version?:string;timeframe:string;scanner_timestamp:string;input_count:number;pass_count:number;hold_count:number;long_pass:number;short_pass:number;status:string;processing_ms:number;rows:StrategyRow[]};
+type StrategyWorkerStatus={running:boolean;last_started_at?:string|null;last_finished_at?:string|null;last_error?:string|null;last_layer?:string;run_count:number;last_input_count:number;last_pass_count:number;last_hold_count:number;last_long_pass:number;last_short_pass:number;waiting_for_scanner_cooldown?:boolean;scanner_retry_in_seconds?:number};
 type CandlePayload={open_time:number;open:string;high:string;low:string;close:string;volume:string;close_time:number};
 
 const FUTURES_API="https://fapi.binance.com";
@@ -22,21 +25,32 @@ async function fetchFuturesCandles(symbol:string,timeframe:string){const r=await
 export default function EngineWorkingLogPage(){
  const today=useMemo(()=>localDateValue(new Date()),[]);
  const[startDate,setStartDate]=useState(today);const[endDate,setEndDate]=useState(today);const[symbol,setSymbol]=useState("BTCUSDT");const[timeframe,setTimeframe]=useState("15m");
- const[indicatorLogs,setIndicatorLogs]=useState<IndicatorLog[]>([]);const[scannerLogs,setScannerLogs]=useState<ScannerRun[]>([]);const[worker,setWorker]=useState<WorkerStatus|null>(null);const[runningIndicator,setRunningIndicator]=useState(false);const[error,setError]=useState<string|null>(null);const[cooldown,setCooldown]=useState(0);
+ const[indicatorLogs,setIndicatorLogs]=useState<IndicatorLog[]>([]);
+ const[scannerLogs,setScannerLogs]=useState<ScannerRun[]>([]);
+ const[worker,setWorker]=useState<WorkerStatus|null>(null);
+ const[strategyLogs,setStrategyLogs]=useState<StrategyRun[]>([]);
+ const[strategyWorker,setStrategyWorker]=useState<StrategyWorkerStatus|null>(null);
+ const[runningIndicator,setRunningIndicator]=useState(false);
+ const[error,setError]=useState<string|null>(null);
+ const[cooldown,setCooldown]=useState(0);
 
  const loadIndicator=useCallback(async()=>{try{const start=new Date(startDate+"T00:00:00").toISOString();const end=new Date(endDate+"T23:59:59.999").toISOString();const r=await fetch("/api/indicators/logs?"+new URLSearchParams({start,end}),{cache:"no-store"});if(!r.ok)throw new Error("Unable to load Indicator Engine logs");setIndicatorLogs((await r.json()).logs??[])}catch(e){setError(e instanceof Error?e.message:"Indicator log error")}},[startDate,endDate]);
  const loadScanner=useCallback(async()=>{try{const[lr,wr]=await Promise.all([fetch("/api/scanner/logs",{cache:"no-store"}),fetch("/api/scanner/worker/status",{cache:"no-store"})]);if(!lr.ok||!wr.ok)throw new Error("Unable to load Scanner worker/logs");setScannerLogs((await lr.json()).logs??[]);const ws=await wr.json() as WorkerStatus;setWorker(ws);setCooldown(ws.retry_in_seconds??0)}catch(e){setError(e instanceof Error?e.message:"Scanner log error")}},[]);
- useEffect(()=>{void loadIndicator();void loadScanner();const id=window.setInterval(()=>void loadScanner(),15000);return()=>window.clearInterval(id)},[loadIndicator,loadScanner]);
+ const loadStrategy=useCallback(async()=>{try{const[lr,wr]=await Promise.all([fetch("/api/strategy/logs",{cache:"no-store"}),fetch("/api/strategy/worker/status",{cache:"no-store"})]);if(!lr.ok||!wr.ok)throw new Error("Unable to load Strategy worker/logs");setStrategyLogs((await lr.json()).logs??[]);setStrategyWorker(await wr.json() as StrategyWorkerStatus)}catch(e){setError(e instanceof Error?e.message:"Strategy log error")}},[]);
+
+ useEffect(()=>{void loadIndicator();void loadScanner();void loadStrategy();const id=window.setInterval(()=>{void loadScanner();void loadStrategy()},15000);return()=>window.clearInterval(id)},[loadIndicator,loadScanner,loadStrategy]);
  useEffect(()=>{if(!worker?.rate_limited){setCooldown(0);return}const id=window.setInterval(()=>setCooldown(v=>Math.max(0,v-1)),1000);return()=>window.clearInterval(id)},[worker?.rate_limited]);
 
  const runIndicator=async()=>{const s=symbol.trim().replace(/[\/\-\s]/g,"").toUpperCase();if(!s)return;setRunningIndicator(true);setError(null);try{const candles=await fetchFuturesCandles(s,timeframe);const r=await fetch("/api/indicators/run/"+s+"?timeframe="+timeframe+"&limit="+HISTORY_LIMIT,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(candles)});if(!r.ok){const b=await r.json().catch(()=>({}));throw new Error(b.detail??"Indicator Engine failed")}setSymbol(s);await loadIndicator()}catch(e){setError(e instanceof Error?e.message:"Indicator Engine failed")}finally{setRunningIndicator(false)}};
 
  const downloadIndicator=()=>csvDownload("indicator-engine-"+startDate+"-to-"+endDate+".csv",[["timestamp","symbol","timeframe","status","ema9","ema20","ema21","ema50","ema200","rsi14","macd","signal","histogram","volume_ratio","ms","error"],...indicatorLogs.map(x=>[x.timestamp,x.symbol,x.timeframe,x.status,x.ema_9,x.ema_20,x.ema_21,x.ema_50,x.ema_200,x.rsi_14,x.macd,x.macd_signal,x.macd_histogram,x.volume_ratio,x.processing_ms,x.error])]);
- const downloadScanner=()=>csvDownload("futures-mtf-scanner-"+today+".csv",[["timestamp","symbol","side","score","structure_1h","rsi_1h","rvol_1h","atr_pct_1h","oi_change_1h_pct","spread_pct","quote_volume","last_price","reasons"],...scannerLogs.flatMap(run=>run.candidates.map(c=>[run.timestamp,c.symbol,c.side,c.score,c.structure_1h,c.rsi_1h,c.rvol_1h,c.atr_pct_1h,c.oi_change_1h_pct,c.spread_pct,c.quote_volume,c.last_price,c.reasons.join(" | ")]))]);
+ const downloadScanner=()=>csvDownload("futures-scanner-1h-"+today+".csv",[["timestamp","symbol","side","score","structure_1h","rsi_1h","rvol_1h","atr_pct_1h","oi_change_1h_pct","spread_pct","quote_volume","last_price","reasons"],...scannerLogs.flatMap(run=>run.candidates.map(c=>[run.timestamp,c.symbol,c.side,c.score,c.structure_1h,c.rsi_1h,c.rvol_1h,c.atr_pct_1h,c.oi_change_1h_pct,c.spread_pct,c.quote_volume,c.last_price,c.reasons.join(" | ")]))]);
+ const downloadStrategy=()=>csvDownload("strategy-engine-15m-"+today+".csv",[["timestamp","symbol","side","status","score","scanner_score","rsi_15m","macd_histogram_15m","rvol_15m","atr_pct_15m","reasons","hold_reasons","run_ms"],...strategyLogs.flatMap(run=>run.rows.map(row=>[run.timestamp,row.symbol,row.side,row.status,row.score,row.scanner_score,row.rsi_15m,row.macd_histogram_15m,row.rvol_15m,row.atr_pct_15m,(row.reasons??[]).join(" | "),(row.hold_reasons??[]).join(" | "),run.processing_ms]))]);
  const latest=scannerLogs[0];
+ const latestStrategy=strategyLogs[0];
 
  return <div className="pageWrap">
-  <div className="pageHeader"><div><p className="eyebrow">Engine Observability</p><h1>Engine Working Log</h1><p className="muted">Compact dropdown logs for each engine. Scanner ownership now ends at the locked 1H Top 30.</p></div><span className="modePill"><span />{worker?.running?"Scanner worker active":"Scanner worker inactive"}</span></div>
+  <div className="pageHeader"><div><p className="eyebrow">Engine Observability</p><h1>Engine Working Log</h1><p className="muted">Each implemented engine gets its own live log. Current boundary: Scanner Top30 → 15m Strategy PASS/HOLD.</p></div><span className="modePill"><span />{worker?.running&&strategyWorker?.running?"Workers active":"Worker check"}</span></div>
   {error&&<div className="panel" style={{padding:12,marginBottom:12}}><span className="negative">{error}</span></div>}
 
   <details className="panel" style={detailsStyle}>
@@ -48,8 +62,8 @@ export default function EngineWorkingLogPage(){
    </div>
   </details>
 
-  <details className="panel" open style={detailsStyle}>
-   <summary style={summaryStyle}><div><p className="eyebrow">2. Engine</p><strong>Futures Scanner Engine</strong><div className="muted" style={{fontSize:10,marginTop:4}}>{worker?.running?("Scheduler active · "+(worker.last_layer??"startup")):"Worker not running"} · MTF v1</div></div><span className="periodTag">Open log ▾</span></summary>
+  <details className="panel" style={detailsStyle}>
+   <summary style={summaryStyle}><div><p className="eyebrow">2. Engine</p><strong>Futures Scanner Engine</strong><div className="muted" style={{fontSize:10,marginTop:4}}>{worker?.running?("Scheduler active · "+(worker.last_layer??"startup")):"Worker not running"} · 1H v1</div></div><span className="periodTag">Open log ▾</span></summary>
    <div style={bodyStyle}>
     <div style={{display:"grid",gridTemplateColumns:"repeat(5,minmax(0,1fr))",gap:10,marginBottom:12}}>
      <div style={miniCard}><span>Worker</span><strong className={worker?.running?"positive":"negative"}>{worker?.running?"RUNNING":"STOPPED"}</strong></div>
@@ -59,8 +73,26 @@ export default function EngineWorkingLogPage(){
      <div style={miniCard}><span>Top 30</span><strong>{worker?.last_top30??latest?.pipeline?.top_30?.passed??0}</strong></div>
     </div>
     {worker?.rate_limited?<div className="muted" style={{marginBottom:10,fontSize:11}}>Binance cooldown active · automatic retry in {duration(cooldown)}</div>:worker?.last_error&&<div className="negative" style={{marginBottom:10,fontSize:11}}>Worker error: {worker.last_error}</div>}
-    <div style={{...toolbarStyle,justifyContent:"space-between"}}><span className="muted">Scanner runs once per 1H cycle: Scan Pool → 1H Trend → 1H Quality → locked Top 30. Strategy starts after this boundary.</span><div style={{display:"flex",gap:8}}><button style={buttonStyle} onClick={()=>void loadScanner()}>Refresh</button><button style={buttonStyle} onClick={downloadScanner} disabled={!scannerLogs.length}>Download CSV</button></div></div>
+    <div style={{...toolbarStyle,justifyContent:"space-between"}}><span className="muted">Scanner runs once per 1H cycle: Scan Pool → 1H Trend → 1H Quality → locked Top 30.</span><div style={{display:"flex",gap:8}}><button style={buttonStyle} onClick={()=>void loadScanner()}>Refresh</button><button style={buttonStyle} onClick={downloadScanner} disabled={!scannerLogs.length}>Download CSV</button></div></div>
     <div style={{overflow:"auto"}}><div style={{minWidth:980}}><div style={{...scannerRow,...headStyle}}><span>Time</span><span>Pool</span><span>1H Trend</span><span>1H Quality</span><span>Top30</span><span>LONG Bias</span><span>SHORT Bias</span><span>ms</span></div>{scannerLogs.slice(0,50).map((x,i)=><div key={x.timestamp+"-"+i} style={scannerRow}><span>{new Date(x.timestamp).toLocaleString()}</span><span>{x.pipeline?.scan_pool?.passed??0}</span><span>{x.pipeline?.trend_1h?.passed??0}</span><span>{x.pipeline?.participation?.passed??0}</span><span>{x.pipeline?.top_30?.passed??0}</span><span className="positive">{x.long_candidates??0}</span><span className="negative">{x.short_candidates??0}</span><span>{n(x.processing_ms,2)}</span></div>)}</div></div>
+   </div>
+  </details>
+
+  <details className="panel" open style={detailsStyle}>
+   <summary style={summaryStyle}><div><p className="eyebrow">3. Engine</p><strong>15m Strategy Engine</strong><div className="muted" style={{fontSize:10,marginTop:4}}>{strategyWorker?.running?("Scheduler active · "+(strategyWorker.last_layer??"waiting")):"Worker not running"} · 15m v1</div></div><span className="periodTag">Open log ▾</span></summary>
+   <div style={bodyStyle}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(6,minmax(0,1fr))",gap:10,marginBottom:12}}>
+     <div style={miniCard}><span>Worker</span><strong className={strategyWorker?.running?"positive":"negative"}>{strategyWorker?.running?"RUNNING":"STOPPED"}</strong></div>
+     <div style={miniCard}><span>Runs</span><strong>{strategyWorker?.run_count??0}</strong></div>
+     <div style={miniCard}><span>Input Top30</span><strong>{strategyWorker?.last_input_count??latestStrategy?.input_count??0}</strong></div>
+     <div style={miniCard}><span>PASS</span><strong className="positive">{strategyWorker?.last_pass_count??latestStrategy?.pass_count??0}</strong></div>
+     <div style={miniCard}><span>HOLD</span><strong>{strategyWorker?.last_hold_count??latestStrategy?.hold_count??0}</strong></div>
+     <div style={miniCard}><span>L / S PASS</span><strong>{strategyWorker?.last_long_pass??latestStrategy?.long_pass??0} / {strategyWorker?.last_short_pass??latestStrategy?.short_pass??0}</strong></div>
+    </div>
+    {strategyWorker?.waiting_for_scanner_cooldown?<div className="muted" style={{marginBottom:10,fontSize:11}}>Waiting for shared Binance cooldown · {duration(strategyWorker.scanner_retry_in_seconds??0)}</div>:strategyWorker?.last_error&&<div className="negative" style={{marginBottom:10,fontSize:11}}>Strategy error: {strategyWorker.last_error}</div>}
+    <div style={{...toolbarStyle,justifyContent:"space-between"}}><span className="muted">Uses ONLY current Scanner Top30. Preserves 1H bias. Checks EMA structure, pullback, rejection, MACD, RSI, RVOL and ATR; outputs PASS/HOLD.</span><div style={{display:"flex",gap:8}}><button style={buttonStyle} onClick={()=>void loadStrategy()}>Refresh</button><button style={buttonStyle} onClick={downloadStrategy} disabled={!strategyLogs.length}>Download CSV</button></div></div>
+    <div style={{overflow:"auto"}}><div style={{minWidth:1040}}><div style={{...strategyRunRow,...headStyle}}><span>Time</span><span>Input</span><span>PASS</span><span>HOLD</span><span>LONG PASS</span><span>SHORT PASS</span><span>ms</span></div>{strategyLogs.slice(0,50).map((x,i)=><div key={x.timestamp+"-"+i} style={strategyRunRow}><span>{new Date(x.timestamp).toLocaleString()}</span><span>{x.input_count}</span><span className="positive">{x.pass_count}</span><span>{x.hold_count}</span><span className="positive">{x.long_pass}</span><span className="negative">{x.short_pass}</span><span>{n(x.processing_ms,2)}</span></div>)}</div></div>
+    {latestStrategy&&<div style={{overflow:"auto",marginTop:12}}><div style={{minWidth:1180}}><div style={{...strategySymbolRow,...headStyle}}><span>Symbol</span><span>Bias</span><span>Status</span><span>Score</span><span>RSI</span><span>MACD Hist</span><span>RVOL</span><span>ATR%</span><span>Reason</span></div>{latestStrategy.rows.map((x,i)=>{const reason=x.status==="PASS"?(x.reasons??[]).join(" · "):(x.hold_reasons??[]).join(" · ");return <div key={x.symbol+"-"+i} style={strategySymbolRow}><strong>{x.symbol}</strong><span className={x.side==="LONG"?"positive":"negative"}>{x.side}</span><strong className={x.status==="PASS"?"positive":"neutral"}>{x.status}</strong><span>{x.score}</span><span>{n(x.rsi_15m,2)}</span><span>{n(x.macd_histogram_15m,5)}</span><span>{n(x.rvol_15m,2)}x</span><span>{n(x.atr_pct_15m,2)}%</span><span title={reason} style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{reason||"—"}</span></div>})}</div></div>}
    </div>
   </details>
  </div>
@@ -78,3 +110,5 @@ const miniCard={border:"1px solid #1d2a39",borderRadius:9,padding:12,background:
 const headStyle={color:"#69768a",fontSize:9,textTransform:"uppercase"} as const;
 const indicatorRow={display:"grid",gridTemplateColumns:"150px 95px 45px 65px 80px 80px 80px 80px 60px 85px 85px 65px 55px",gap:8,padding:"9px 10px",borderBottom:"1px solid #171f2a",fontSize:10,alignItems:"center"} as const;
 const scannerRow={display:"grid",gridTemplateColumns:"180px 70px 80px 90px 70px 80px 85px 70px",gap:10,padding:"10px",borderBottom:"1px solid #171f2a",fontSize:10,alignItems:"center"} as const;
+const strategyRunRow={display:"grid",gridTemplateColumns:"190px 80px 80px 80px 100px 100px 80px",gap:10,padding:"10px",borderBottom:"1px solid #171f2a",fontSize:10,alignItems:"center"} as const;
+const strategySymbolRow={display:"grid",gridTemplateColumns:"100px 70px 70px 60px 70px 95px 70px 70px 1fr",gap:10,padding:"9px 10px",borderBottom:"1px solid #171f2a",fontSize:10,alignItems:"center"} as const;
