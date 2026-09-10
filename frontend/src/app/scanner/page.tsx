@@ -7,7 +7,7 @@ type Pipeline={scan_pool?:StageDiag;trend_1h?:StageDiag;participation?:StageDiag
 type Candidate={symbol:string;side:"LONG"|"SHORT";score:number;quote_volume:number;last_price:number;structure_1h?:string;rsi_1h?:number;rvol_1h?:number;atr_pct_1h?:number;oi_change_1h_pct?:number;spread_pct?:number;reasons:string[]};
 type ScannerRun={timestamp:string;engine:string;version?:string;status:string;market?:string;candidate_count:number;long_candidates:number;short_candidates:number;hold_count?:number;pipeline?:Pipeline;processing_ms:number;candidates:Candidate[]};
 type LogsResponse={engine:string;logs:ScannerRun[]};
-type WorkerStatus={running:boolean;interval_seconds:number;architecture?:string;scan_pool_limit:number;top_limit:number;min_quote_volume:number;last_started_at?:string|null;last_finished_at?:string|null;last_error?:string|null;last_candidate_count:number;last_long_candidates:number;last_short_candidates:number;last_scan_pool:number;last_trend_passed:number;last_top30:number;run_count:number};
+type WorkerStatus={running:boolean;interval_seconds:number;architecture?:string;schedule?:{trend:string;setup:string;entry:string};scan_pool_limit:number;top_limit:number;min_quote_volume:number;last_started_at?:string|null;last_finished_at?:string|null;last_error?:string|null;last_candidate_count:number;last_long_candidates:number;last_short_candidates:number;last_scan_pool:number;last_trend_passed:number;last_top30:number;last_layer?:string;rate_limited?:boolean;retry_in_seconds?:number;run_count:number};
 
 function fmt(v:number|undefined,d=2){return v===undefined||!Number.isFinite(v)?"—":v.toLocaleString(undefined,{maximumFractionDigits:d})}
 
@@ -71,9 +71,9 @@ export default function ScannerPage(){
 
   <section className="panel" style={{padding:18,marginBottom:14}}>
    <div className="panelHead" style={{alignItems:"flex-start"}}>
-    <div><p className="eyebrow">MTF Futures Pipeline</p><h2>Trend → Setup → Entry</h2><p className="muted" style={{marginTop:6}}>Backend Python loop every {worker?.interval_seconds??60}s while service is awake.</p></div>
+    <div><p className="eyebrow">MTF Futures Pipeline</p><h2>Trend → Setup → Entry</h2><p className="muted" style={{marginTop:6}}>Scheduler tick {worker?.interval_seconds??30}s · 1H refresh on new 1H candle · 15m setup on new 15m candle · 5m entry on new 5m candle.</p></div>
     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-     <span className="periodTag">Runs {worker?.run_count??0}</span>
+     <span className="periodTag">Runs {worker?.run_count??0}</span><span className="periodTag">{worker?.last_layer??"startup"}</span>{worker?.rate_limited&&<span className="periodTag">Cooldown {worker.retry_in_seconds??0}s</span>}
      <span className="periodTag">Top30 {worker?.last_top30??latest?.pipeline?.top_30?.passed??0}</span>
      <button onClick={()=>void runNow()} disabled={scanning} style={runStyle}>{scanning?"Scanning…":"Run Now"}</button>
      <button onClick={()=>void load()} style={controlStyle}>Refresh</button>
