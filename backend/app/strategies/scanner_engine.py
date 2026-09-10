@@ -18,7 +18,7 @@ STABLE_BASE_ASSETS = {
 }
 
 
-def _score_candidate(metrics: dict[str, float]) -> tuple[int, list[str]]:
+def _score_long(metrics: dict[str, float]) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
 
@@ -37,6 +37,32 @@ def _score_candidate(metrics: dict[str, float]) -> tuple[int, list[str]]:
     if metrics["macd"] > metrics["macd_signal"]:
         score += 15
         reasons.append("MACD above signal")
+    if metrics["volume_ratio"] >= MIN_VOLUME_RATIO:
+        score += 15
+        reasons.append("Volume expansion >= 1.5x")
+
+    return score, reasons
+
+
+def _score_short(metrics: dict[str, float]) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+
+    if metrics["ema_9"] < metrics["ema_21"]:
+        score += 20
+        reasons.append("EMA 9 below EMA 21")
+    if metrics["close"] < metrics["ema_50"]:
+        score += 15
+        reasons.append("Price below EMA 50")
+    if metrics["ema_50"] < metrics["ema_200"]:
+        score += 20
+        reasons.append("EMA 50 below EMA 200")
+    if 30 <= metrics["rsi_14"] <= 50:
+        score += 15
+        reasons.append("RSI in bearish momentum zone")
+    if metrics["macd"] < metrics["macd_signal"]:
+        score += 15
+        reasons.append("MACD below signal")
     if metrics["volume_ratio"] >= MIN_VOLUME_RATIO:
         score += 15
         reasons.append("Volume expansion >= 1.5x")
@@ -134,7 +160,7 @@ class ScannerEngine:
                 volume_ratio = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0.0
                 evaluated += 1
 
-                # Volume expansion is a hard eligibility rule for Scanner v1.
+                # Volume expansion is a hard eligibility rule for both directions.
                 if volume_ratio < MIN_VOLUME_RATIO:
                     skipped_volume += 1
                     continue
@@ -150,14 +176,27 @@ class ScannerEngine:
                     "macd_signal": macd_signal_values[-1],
                     "volume_ratio": volume_ratio,
                 }
-                score, reasons = _score_candidate(metrics)
+                long_score, long_reasons = _score_long(metrics)
+                short_score, short_reasons = _score_short(metrics)
 
-                if score >= MIN_CANDIDATE_SCORE:
+                if long_score >= MIN_CANDIDATE_SCORE or short_score >= MIN_CANDIDATE_SCORE:
+                    if long_score >= short_score:
+                        side = "LONG"
+                        score = long_score
+                        reasons = long_reasons
+                    else:
+                        side = "SHORT"
+                        score = short_score
+                        reasons = short_reasons
+
                     candidates.append(
                         {
                             "symbol": symbol,
                             "timeframe": timeframe,
+                            "side": side,
                             "score": score,
+                            "long_score": long_score,
+                            "short_score": short_score,
                             "quote_volume": round(quote_volume, 2),
                             "last_price": round(metrics["close"], 8),
                             "rsi_14": round(metrics["rsi_14"], 2),
@@ -179,6 +218,8 @@ class ScannerEngine:
             key=lambda item: (item["score"], item["volume_ratio"], item["quote_volume"]),
             reverse=True,
         )
+        long_candidates = sum(1 for item in candidates if item["side"] == "LONG")
+        short_candidates = sum(1 for item in candidates if item["side"] == "SHORT")
         result = {
             "timestamp": timestamp,
             "engine": "Scanner Engine",
@@ -190,6 +231,8 @@ class ScannerEngine:
             "input_markets": len(markets),
             "evaluated_markets": evaluated,
             "candidate_count": len(candidates),
+            "long_candidates": long_candidates,
+            "short_candidates": short_candidates,
             "skipped_liquidity": skipped_liquidity,
             "skipped_stablecoin": skipped_stablecoin,
             "skipped_candles": skipped_candles,
