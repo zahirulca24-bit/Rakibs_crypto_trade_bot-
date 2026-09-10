@@ -63,7 +63,8 @@ class FuturesScannerWorker:
         self.last_top30 = 0
         self.run_count = 0
 
-        # Protect Render/shared IP after deploy: do not immediately re-hit Binance if a prior instance was banned.\n        self.blocked_until = time() + 60 * 60
+        # Protect Render/shared IP after deploy: do not immediately re-hit Binance if a prior instance was banned.
+        self.blocked_until = time() + 60 * 60
         self.backoff_seconds = DEFAULT_BACKOFF_SECONDS
         self.last_layer = "startup cooldown"
 
