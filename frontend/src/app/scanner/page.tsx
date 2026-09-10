@@ -90,8 +90,15 @@ export default function ScannerPage() {
       for (let offset=0; offset<liquid.length; offset+=5) {
         const batch = liquid.slice(offset, offset+5);
         setProgress(`Loading candles ${Math.min(offset+batch.length, liquid.length)}/${liquid.length}`);
-        const results = await Promise.allSettled(batch.map(async (item) => ({ symbol:item.symbol, quote_volume:Number(item.quoteVolume), candles:await fetchCandles(item.symbol, timeframe) })));
-        for (const result of results) if (result.status === "fulfilled") markets.push(result.value);
+        const results = await Promise.all(batch.map(async (item) => {
+          try {
+            return { symbol:item.symbol, quote_volume:Number(item.quoteVolume), candles:await fetchCandles(item.symbol, timeframe) };
+          } catch {
+            // Preserve the symbol with empty candles so the backend can report it as stuck at the Candles stage.
+            return { symbol:item.symbol, quote_volume:Number(item.quoteVolume), candles:[] as CandlePayload[] };
+          }
+        }));
+        markets.push(...results);
       }
       setProgress("Scoring LONG / SHORT candidates");
       const response = await fetch(`/api/scanner/run?timeframe=${timeframe}&min_quote_volume=${MIN_QUOTE_VOLUME}`, { method:"POST", cache:"no-store", headers:{"content-type":"application/json"}, body:JSON.stringify(markets) });
@@ -110,10 +117,23 @@ export default function ScannerPage() {
 
   const stages = useMemo(() => {
     const p = latest?.pipeline;
+    const backendCandleDrops = [
+      ...(p?.dedupe_liquidity?.dropped_symbols ?? []),
+      ...(p?.candles?.dropped_symbols ?? []),
+    ];
+    const uniqueCandleDrops = Array.from(new Set(backendCandleDrops));
+    const candlePassSymbols = (liquidityDiag?.passed_symbols ?? []).filter((symbol) => !uniqueCandleDrops.includes(symbol));
+    const candleDiag:StageDiag|null = p?.candles ? {
+      passed:p.candles.passed,
+      dropped:Math.max(0, (liquidityDiag?.passed ?? latest?.input_markets ?? 0) - p.candles.passed),
+      dropped_symbols:uniqueCandleDrops,
+      passed_symbols:candlePassSymbols,
+    } : null;
+
     return [
       { title:"Universe", rule:"Active Spot + allowed quote", diag:universeDiag },
       { title:"Liquidity", rule:"≥ $10M + top 30", diag:liquidityDiag },
-      { title:"Candles", rule:"≥ 200 closed candles", diag:p?.candles ?? null },
+      { title:"Candles", rule:"Fetch + dedupe + ≥ 200 closed candles", diag:candleDiag },
       { title:"Volume", rule:"≥ 1.5x vs previous 20", diag:p?.volume ?? null },
       { title:"Direction", rule:"RSI + MACD + LONG/SHORT score", diag:p?.direction ?? null },
       { title:"Shortlist", rule:"Final eligible candidates", diag:p?.shortlist ?? null },
