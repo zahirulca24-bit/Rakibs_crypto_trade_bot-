@@ -9,13 +9,15 @@ type ScannerRun={timestamp:string;engine:string;version?:string;status:string;ma
 type LogsResponse={engine:string;logs:ScannerRun[]};
 type WorkerStatus={running:boolean;interval_seconds:number;architecture?:string;schedule?:{trend:string;setup:string;entry:string};scan_pool_limit:number;top_limit:number;min_quote_volume:number;last_started_at?:string|null;last_finished_at?:string|null;last_error?:string|null;last_candidate_count:number;last_long_candidates:number;last_short_candidates:number;last_scan_pool:number;last_trend_passed:number;last_top30:number;last_layer?:string;rate_limited?:boolean;retry_in_seconds?:number;run_count:number};
 
-function fmt(v:number|undefined,d=2){return v===undefined||!Number.isFinite(v)?"—":v.toLocaleString(undefined,{maximumFractionDigits:d})}\nfunction duration(seconds:number){const s=Math.max(0,Math.floor(seconds));const h=Math.floor(s/3600);const m=Math.floor((s%3600)/60);const r=s%60;return h>0?(h+"h "+String(m).padStart(2,"0")+"m "+String(r).padStart(2,"0")+"s"):(m+"m "+String(r).padStart(2,"0")+"s")}
+function fmt(v:number|undefined,d=2){return v===undefined||!Number.isFinite(v)?"—":v.toLocaleString(undefined,{maximumFractionDigits:d})}
+function duration(seconds:number){const s=Math.max(0,Math.floor(seconds));const h=Math.floor(s/3600);const m=Math.floor((s%3600)/60);const r=s%60;return h>0?(h+"h "+String(m).padStart(2,"0")+"m "+String(r).padStart(2,"0")+"s"):(m+"m "+String(r).padStart(2,"0")+"s")}
 
 export default function ScannerPage(){
  const[logs,setLogs]=useState<ScannerRun[]>([]);
  const[worker,setWorker]=useState<WorkerStatus|null>(null);
  const[scanning,setScanning]=useState(false);
- const[error,setError]=useState<string|null>(null);\n const[cooldown,setCooldown]=useState(0);
+ const[error,setError]=useState<string|null>(null);
+ const[cooldown,setCooldown]=useState(0);
  const[selectedStage,setSelectedStage]=useState("1H Trend");
  const latest=logs[0];
 
@@ -29,7 +31,8 @@ export default function ScannerPage(){
   }catch(e){setError(e instanceof Error?e.message:"Unable to load scanner")}
  },[]);
 
- useEffect(()=>{void load();const id=window.setInterval(()=>void load(),15000);return()=>window.clearInterval(id)},[load]);\n useEffect(()=>{if(!worker?.rate_limited){setCooldown(0);return}const id=window.setInterval(()=>setCooldown(v=>Math.max(0,v-1)),1000);return()=>window.clearInterval(id)},[worker?.rate_limited]);
+ useEffect(()=>{void load();const id=window.setInterval(()=>void load(),15000);return()=>window.clearInterval(id)},[load]);
+ useEffect(()=>{if(!worker?.rate_limited){setCooldown(0);return}const id=window.setInterval(()=>setCooldown(v=>Math.max(0,v-1)),1000);return()=>window.clearInterval(id)},[worker?.rate_limited]);
 
  const runNow=useCallback(async()=>{
   if(scanning)return;
