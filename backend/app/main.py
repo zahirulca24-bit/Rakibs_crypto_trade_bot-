@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from app.api.router import api_router
 from app.core.config import get_settings
+from app.services.scanner_worker import scanner_worker
 
 settings = get_settings()
 
@@ -11,6 +12,16 @@ app = FastAPI(
 )
 
 app.include_router(api_router)
+
+
+@app.on_event("startup")
+async def start_scanner_worker() -> None:
+    await scanner_worker.start()
+
+
+@app.on_event("shutdown")
+async def stop_scanner_worker() -> None:
+    await scanner_worker.stop()
 
 
 @app.get("/")
