@@ -12,6 +12,10 @@ SUPPORTED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 MIN_CLOSED_CANDLES = 200
 MIN_VOLUME_RATIO = 1.5
 MIN_CANDIDATE_SCORE = 50
+QUOTE_ASSETS = ("FDUSD", "USDT", "USDC")
+STABLE_BASE_ASSETS = {
+    "USDT", "USDC", "FDUSD", "TUSD", "USDP", "DAI", "USD1", "USDE", "PYUSD", "BUSD",
+}
 
 
 def _score_candidate(metrics: dict[str, float]) -> tuple[int, list[str]]:
@@ -40,12 +44,15 @@ def _score_candidate(metrics: dict[str, float]) -> tuple[int, list[str]]:
     return score, reasons
 
 
-def _closed_candles(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return candles that are already closed, ordered oldest -> newest.
+def _base_asset(symbol: str) -> str:
+    for quote in QUOTE_ASSETS:
+        if symbol.endswith(quote):
+            return symbol[: -len(quote)]
+    return symbol
 
-    Binance REST normally includes the currently-forming candle as the final row.
-    Scanner decisions must use closed candles only so repeated runs are stable.
-    """
+
+def _closed_candles(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return already-closed candles ordered oldest -> newest."""
     now_ms = int(time() * 1000)
     normalized: list[dict[str, Any]] = []
     for candle in candles:
@@ -79,6 +86,7 @@ class ScannerEngine:
         candidates: list[dict[str, Any]] = []
         evaluated = 0
         skipped_liquidity = 0
+        skipped_stablecoin = 0
         skipped_candles = 0
         skipped_volume = 0
         invalid_markets = 0
@@ -90,6 +98,10 @@ class ScannerEngine:
                 if not symbol or symbol in seen_symbols:
                     continue
                 seen_symbols.add(symbol)
+
+                if _base_asset(symbol) in STABLE_BASE_ASSETS:
+                    skipped_stablecoin += 1
+                    continue
 
                 quote_volume = float(market.get("quote_volume", 0))
                 if quote_volume < min_quote_volume:
@@ -122,7 +134,7 @@ class ScannerEngine:
                 volume_ratio = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0.0
                 evaluated += 1
 
-                # Volume expansion is an eligibility rule, not just a scoring bonus.
+                # Volume expansion is a hard eligibility rule for Scanner v1.
                 if volume_ratio < MIN_VOLUME_RATIO:
                     skipped_volume += 1
                     continue
@@ -163,7 +175,10 @@ class ScannerEngine:
                 invalid_markets += 1
                 continue
 
-        candidates.sort(key=lambda item: (item["score"], item["volume_ratio"], item["quote_volume"]), reverse=True)
+        candidates.sort(
+            key=lambda item: (item["score"], item["volume_ratio"], item["quote_volume"]),
+            reverse=True,
+        )
         result = {
             "timestamp": timestamp,
             "engine": "Scanner Engine",
@@ -176,6 +191,7 @@ class ScannerEngine:
             "evaluated_markets": evaluated,
             "candidate_count": len(candidates),
             "skipped_liquidity": skipped_liquidity,
+            "skipped_stablecoin": skipped_stablecoin,
             "skipped_candles": skipped_candles,
             "skipped_volume": skipped_volume,
             "invalid_markets": invalid_markets,
