@@ -336,7 +336,7 @@ class FuturesScannerWorker:
             self.last_trend_passed = int((pipeline.get("trend_1h") or {}).get("passed", 0))
             self.last_top30 = int((pipeline.get("top_30") or {}).get("passed", 0))
             self.run_count += 1
-            self.last_layer = "1H scan complete · Top30 locked"
+            self.last_layer = "1H scan complete · Top30 updated"
             self._last_hour_slot = _hour_slot()
             try:
                 await asyncio.to_thread(save_scanner_result, result)
@@ -357,7 +357,7 @@ class FuturesScannerWorker:
         current_slot = _hour_slot()
         first_scan = self.run_count == 0
         if not first_scan and current_slot == self._last_hour_slot:
-            self.last_layer = "1H Top30 locked"
+            self.last_layer = "1H auto schedule waiting"
             return None
 
         return await self._run_1h_scan()
@@ -367,11 +367,6 @@ class FuturesScannerWorker:
             raise BinanceRateLimitError(
                 f"Binance cooldown active; retry in {int(self.blocked_until - time())}s"
             )
-        if self.run_count > 0 and _hour_slot() == self._last_hour_slot:
-            self.last_layer = "1H Top30 locked"
-            logs = __import__("app.strategies.scanner_engine", fromlist=["get_scanner_logs"]).get_scanner_logs()
-            if logs:
-                return logs[0]
         return await self._run_1h_scan()
 
 
