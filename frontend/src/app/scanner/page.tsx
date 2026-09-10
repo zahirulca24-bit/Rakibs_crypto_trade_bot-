@@ -65,7 +65,7 @@ export default function ScannerPage(){
  return <div className="pageWrap">
   <div className="pageHeader">
    <div><p className="eyebrow">Binance USD-M Futures</p><h1>Scanner</h1><p className="muted">Scanner is 1H only: Scan Pool → Trend → Quality → Top 30. Strategy starts after this boundary.</p></div>
-   <span className="modePill"><span />{worker?.running?"1H scanner worker active":"Scanner worker inactive"}</span>
+   <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>\n    <span className="modePill"><span />{worker?.running?"Auto 1H active":"Auto 1H inactive"}</span>\n    <button onClick={()=>void runNow()} disabled={scanning||worker?.rate_limited} style={manualRunStyle}>{worker?.rate_limited?"Manual Scan · Cooldown":scanning?"Manual Scan · Running…":"Manual Scan"}</button>\n   </div>
   </div>
 
   <div className="statGrid">
@@ -127,7 +127,7 @@ export default function ScannerPage(){
 }
 
 const controlStyle={background:"#0b1118",color:"#dfe7f1",border:"1px solid #263242",borderRadius:7,padding:"8px 10px",cursor:"pointer"} as const;
-const runStyle={...controlStyle,background:"#173329",color:"#69e4b8",border:"1px solid #285845",fontWeight:700} as const;
+const manualRunStyle={...controlStyle,background:"#173329",color:"#69e4b8",border:"1px solid #285845",fontWeight:700} as const;
 const pipelineWrap={display:"grid",gridTemplateColumns:"repeat(4,minmax(180px,1fr))",gap:10,marginTop:18,overflowX:"auto",paddingBottom:4} as const;
 const pipelineCard={textAlign:"left",border:"1px solid #1d2a39",borderRadius:10,padding:12,background:"#0a1018",color:"#e8edf6",cursor:"pointer",minWidth:180} as const;
 const pipelineSelected={border:"1px solid #3b8068",background:"#102019"} as const;
