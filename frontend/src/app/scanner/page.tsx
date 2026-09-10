@@ -26,7 +26,9 @@ export default function ScannerPage(){
   try{
    const[lr,wr]=await Promise.all([fetch("/api/scanner/logs",{cache:"no-store"}),fetch("/api/scanner/worker/status",{cache:"no-store"})]);
    if(!lr.ok||!wr.ok)throw new Error("Unable to load Futures Scanner state");
-   setLogs((await lr.json() as LogsResponse).logs??[]);
+   const fresh=(await lr.json() as LogsResponse).logs??[];
+   if(fresh.length){setLogs(fresh);window.localStorage.setItem("rakib-scanner-latest",JSON.stringify(fresh[0]))}
+   else{const cached=window.localStorage.getItem("rakib-scanner-latest");if(cached){try{setLogs([JSON.parse(cached) as ScannerRun])}catch{setLogs([])}}else setLogs([])}
    const ws=await wr.json() as WorkerStatus;
    setWorker(ws);
    setCooldown(ws.retry_in_seconds??0);
@@ -35,7 +37,7 @@ export default function ScannerPage(){
   }catch(e){setError(e instanceof Error?e.message:"Unable to load scanner")}
  },[]);
 
- useEffect(()=>{void load();const id=window.setInterval(()=>void load(),15000);return()=>window.clearInterval(id)},[load]);
+ useEffect(()=>{const cached=window.localStorage.getItem("rakib-scanner-latest");if(cached){try{setLogs([JSON.parse(cached) as ScannerRun])}catch{}}void load();const id=window.setInterval(()=>void load(),15000);return()=>window.clearInterval(id)},[load]);
  useEffect(()=>{const id=window.setInterval(()=>{setCooldown(v=>Math.max(0,v-1));setNextScan(v=>Math.max(0,v-1))},1000);return()=>window.clearInterval(id)},[]);
 
  const runNow=useCallback(async()=>{
