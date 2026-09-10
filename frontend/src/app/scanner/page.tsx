@@ -69,7 +69,7 @@ export default function ScannerPage(){
   </div>
 
   <div className="statGrid">
-   <div className="statCard"><span>Last 1H Scan</span><strong>{latest?new Date(latest.timestamp).toLocaleTimeString():"—"}</strong><small className="neutral">Top30 locks for current 1H cycle</small></div>
+   <div className="statCard"><span>Last 1H Scan</span><strong>{latest?new Date(latest.timestamp).toLocaleTimeString():"—"}</strong><small className="neutral">Latest Top30 updates after every successful scan</small></div>
    <div className="statCard"><span>Scan Pool</span><strong>{latest?.pipeline?.scan_pool?.passed??worker?.last_scan_pool??0}</strong><small className="neutral">max 200 liquid perpetuals</small></div>
    <div className="statCard"><span>LONG Bias</span><strong className="positive">{latest?.long_candidates??0}</strong><small className="neutral">inside Scanner Top30</small></div>
    <div className="statCard"><span>SHORT Bias</span><strong className="negative">{latest?.short_candidates??0}</strong><small className="neutral">inside Scanner Top30</small></div>
@@ -77,7 +77,7 @@ export default function ScannerPage(){
 
   <section className="panel" style={{padding:18,marginBottom:14}}>
    <div className="panelHead" style={{alignItems:"flex-start"}}>
-    <div><p className="eyebrow">1H Scanner Pipeline</p><h2>Scanner Ends at Top 30</h2><p className="muted" style={{marginTop:6}}>First successful run → Top30 locked → next new 1H candle refreshes Scanner universe.</p></div>
+    <div><p className="eyebrow">1H Scanner Pipeline</p><h2>Scanner Ends at Top 30</h2><p className="muted" style={{marginTop:6}}>Auto runs once per 1H cycle. Manual Scan can refresh Top30 again anytime when cooldown is clear.</p></div>
     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
      <span className="periodTag">Runs {worker?.run_count??0}</span>
      <span className="periodTag">{worker?.last_layer??"startup"}</span>
@@ -112,12 +112,12 @@ export default function ScannerPage(){
 
   <section className="panel" style={{overflow:"auto"}}>
    <div className="panelHead compact">
-    <div><h2>Locked Top 30 for Current 1H Cycle</h2><p className="muted" style={{marginTop:5}}>{latest?(latest.candidate_count+" contracts · "+latest.processing_ms+" ms"):"No successful 1H scan yet"}</p></div>
+    <div><h2>Current Top 30</h2><p className="muted" style={{marginTop:5}}>{latest?(latest.candidate_count+" contracts · "+latest.processing_ms+" ms"):"No successful 1H scan yet"}</p></div>
     <span className="periodTag">{latest?(latest.long_candidates+" LONG bias · "+latest.short_candidates+" SHORT bias"):"Waiting"}</span>
    </div>
    <div style={{minWidth:1450}}>
     <div style={{...rowStyle,color:"#69768a",fontSize:9,textTransform:"uppercase"}}><span>Contract</span><span>Bias</span><span>Score</span><span>1H Structure</span><span>EMA20</span><span>EMA50</span><span>EMA200</span><span>RSI</span><span>RVOL</span><span>ATR%</span><span>OI Δ 1H</span><span>Spread</span><span>24h Quote Vol</span><span>Price</span><span>Reasons</span></div>
-    {!latest?.candidates.length&&<div style={{padding:28,color:"#78859a",fontSize:12}}>Waiting for first successful 1H Scanner run.</div>}
+    {!latest?.candidates.length&&<div style={{padding:28,color:"#78859a",fontSize:12}}>Waiting for a successful 1H Scanner run.</div>}
     {latest?.candidates.map(c=><div key={c.symbol+"-"+c.side} style={rowStyle}>
      <strong>{c.symbol}</strong><strong className={c.side==="LONG"?"positive":"negative"}>{c.side}</strong><strong>{c.score}</strong><span>{c.structure_1h??"—"}</span><span>{fmt(c.ema20_1h,6)}</span><span>{fmt(c.ema50_1h,6)}</span><span>{fmt(c.ema200_1h,6)}</span><span>{fmt(c.rsi_1h,2)}</span><span>{fmt(c.rvol_1h,2)}x</span><span>{fmt(c.atr_pct_1h,2)}%</span><span className={(c.oi_change_1h_pct??0)>=0?"positive":"negative"}>{fmt(c.oi_change_1h_pct,2)}%</span><span>{fmt(c.spread_pct,4)}%</span><span>{"$"}{fmt(c.quote_volume,0)}</span><span>{fmt(c.last_price,6)}</span><span title={c.reasons.join(" · ")}>{c.reasons.join(" · ")||"—"}</span>
     </div>)}
