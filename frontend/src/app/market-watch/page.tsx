@@ -5,12 +5,10 @@ import { useEffect, useMemo, useState } from "react";
 type Ticker = {
   symbol: string;
   last_price: string;
-  price_change: string;
   price_change_percent: string;
   high_price: string;
   low_price: string;
   volume: string;
-  quote_volume: string;
 };
 
 type Candle = {
@@ -23,21 +21,12 @@ type Candle = {
   close_time: number;
 };
 
-type KlinesResponse = {
-  symbol: string;
-  interval: string;
-  candles: Candle[];
-};
-
 type BookLevel = { price: string; quantity: string };
-type OrderBook = {
-  symbol: string;
-  last_update_id: number;
-  bids: BookLevel[];
-  asks: BookLevel[];
-};
+type OrderBook = { bids: BookLevel[]; asks: BookLevel[] };
 
 const symbol = "BTCUSDT";
+const wsSymbol = symbol.toLowerCase();
+const streamUrl = `wss://stream.binance.com:9443/stream?streams=${wsSymbol}@ticker/${wsSymbol}@kline_1h/${wsSymbol}@depth20@1000ms`;
 
 function formatNumber(value: string | number | undefined, digits = 2) {
   const number = Number(value);
@@ -48,66 +37,122 @@ function formatNumber(value: string | number | undefined, digits = 2) {
   });
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? "Market data request failed");
-  }
-  return response.json();
-}
-
 export default function MarketWatchPage() {
   const [ticker, setTicker] = useState<Ticker | null>(null);
-  const [klines, setKlines] = useState<KlinesResponse | null>(null);
+  const [candles, setCandles] = useState<Candle[]>([]);
   const [orderBook, setOrderBook] = useState<OrderBook | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
     let active = true;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
 
-    const loadFastData = async () => {
+    const loadHistory = async () => {
       try {
-        const [tickerData, bookData] = await Promise.all([
-          getJson<Ticker>(`/api/market/ticker/${symbol}`),
-          getJson<OrderBook>(`/api/market/orderbook/${symbol}?limit=20`),
-        ]);
-        if (!active) return;
-        setTicker(tickerData);
-        setOrderBook(bookData);
-        setError(null);
-      } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : "Unable to load market data");
-      } finally {
-        if (active) setLoading(false);
-      }
-    };
-
-    const loadCandles = async () => {
-      try {
-        const candleData = await getJson<KlinesResponse>(
-          `/api/market/klines/${symbol}?interval=1h&limit=24`,
+        const response = await fetch(
+          `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1h&limit=24`,
+          { cache: "no-store" },
         );
-        if (active) setKlines(candleData);
-      } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : "Unable to load candles");
+        if (!response.ok) throw new Error("Unable to load candle history");
+        const rows = await response.json();
+        if (!active) return;
+        setCandles(
+          rows.map((row: (string | number)[]) => ({
+            open_time: Number(row[0]),
+            open: String(row[1]),
+            high: String(row[2]),
+            low: String(row[3]),
+            close: String(row[4]),
+            volume: String(row[5]),
+            close_time: Number(row[6]),
+          })),
+        );
+      } catch {
+        if (active) setError("Live stream connected, but candle history is unavailable.");
       }
     };
 
-    loadFastData();
-    loadCandles();
-    const fastTimer = window.setInterval(loadFastData, 5000);
-    const candleTimer = window.setInterval(loadCandles, 30000);
+    const connect = () => {
+      socket = new WebSocket(streamUrl);
+
+      socket.onopen = () => {
+        if (!active) return;
+        setConnected(true);
+        setError(null);
+      };
+
+      socket.onmessage = (event) => {
+        if (!active) return;
+        const message = JSON.parse(event.data);
+        const data = message.data;
+        if (!data) return;
+
+        if (data.e === "24hrTicker") {
+          setTicker({
+            symbol: data.s,
+            last_price: data.c,
+            price_change_percent: data.P,
+            high_price: data.h,
+            low_price: data.l,
+            volume: data.v,
+          });
+          return;
+        }
+
+        if (data.e === "kline") {
+          const kline = data.k;
+          const nextCandle: Candle = {
+            open_time: Number(kline.t),
+            open: String(kline.o),
+            high: String(kline.h),
+            low: String(kline.l),
+            close: String(kline.c),
+            volume: String(kline.v),
+            close_time: Number(kline.T),
+          };
+          setCandles((current) => {
+            const existingIndex = current.findIndex((item) => item.open_time === nextCandle.open_time);
+            if (existingIndex >= 0) {
+              const next = [...current];
+              next[existingIndex] = nextCandle;
+              return next.slice(-24);
+            }
+            return [...current, nextCandle].slice(-24);
+          });
+          return;
+        }
+
+        if (Array.isArray(data.bids) && Array.isArray(data.asks)) {
+          setOrderBook({
+            bids: data.bids.map(([price, quantity]: [string, string]) => ({ price, quantity })),
+            asks: data.asks.map(([price, quantity]: [string, string]) => ({ price, quantity })),
+          });
+        }
+      };
+
+      socket.onerror = () => {
+        if (active) setError("Binance WebSocket connection error. Reconnecting…");
+      };
+
+      socket.onclose = () => {
+        if (!active) return;
+        setConnected(false);
+        reconnectTimer = window.setTimeout(connect, 3000);
+      };
+    };
+
+    loadHistory();
+    connect();
 
     return () => {
       active = false;
-      window.clearInterval(fastTimer);
-      window.clearInterval(candleTimer);
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      socket?.close();
     };
   }, []);
 
-  const candles = klines?.candles ?? [];
   const maxRange = useMemo(
     () => Math.max(...candles.map((candle) => Number(candle.high) - Number(candle.low)), 1),
     [candles],
@@ -122,7 +167,7 @@ export default function MarketWatchPage() {
     <div className="terminalPage">
       <div className="terminalTopbar">
         <div>
-          <p className="eyebrow">Spot Market · Live Binance Data</p>
+          <p className="eyebrow">Spot Market · Binance WebSocket</p>
           <div className="pairTitle">
             <span className="coinBadge">₿</span>
             <h1>BTC/USDT</h1>
@@ -131,7 +176,7 @@ export default function MarketWatchPage() {
           {error && <p className="negative">{error}</p>}
         </div>
         <div className="tickerStats">
-          <div><span>Last price</span><strong className={priceClass}>{loading ? "Loading…" : formatNumber(ticker?.last_price)}</strong></div>
+          <div><span>Last price</span><strong className={priceClass}>{formatNumber(ticker?.last_price)}</strong></div>
           <div><span>24h high</span><strong>{formatNumber(ticker?.high_price)}</strong></div>
           <div><span>24h low</span><strong>{formatNumber(ticker?.low_price)}</strong></div>
           <div><span>24h volume</span><strong>{formatNumber(ticker?.volume, 4)} BTC</strong></div>
@@ -165,13 +210,13 @@ export default function MarketWatchPage() {
             <div className="priceMarker">{formatNumber(ticker?.last_price)}</div>
           </div>
           <div className="indicatorPanel">
-            <div className="indicatorHead"><strong>Data status</strong><span>{error ? "Degraded" : "Live"}</span></div>
+            <div className="indicatorHead"><strong>Data status</strong><span>{connected ? "Live WebSocket" : "Connecting…"}</span></div>
             <div className="rsiChart"><div className="rsiLine" /></div>
           </div>
         </section>
 
         <aside className="panel orderBookPanel">
-          <div className="panelHead compact"><h2>Order Book</h2><span className="periodTag">Live</span></div>
+          <div className="panelHead compact"><h2>Order Book</h2><span className="periodTag">WS Live</span></div>
           <div className="bookHeader"><span>Price (USDT)</span><span>Amount (BTC)</span><span>Total</span></div>
           <div className="bookRows asks">
             {asks.map((row) => <div className="bookRow" key={`ask-${row.price}`}><span>{formatNumber(row.price)}</span><span>{formatNumber(row.quantity, 5)}</span><span>{formatNumber(Number(row.price) * Number(row.quantity), 0)}</span></div>)}
