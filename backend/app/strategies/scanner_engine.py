@@ -235,3 +235,10 @@ class ScannerEngine:
 
 def get_scanner_logs() -> list[dict[str, Any]]:
     return list(reversed(SCANNER_LOGS))
+
+
+def restore_scanner_result(result: dict[str, Any]) -> None:
+    if not result or result.get("engine") != "Scanner Engine":
+        return
+    SCANNER_LOGS.append(result)
+    del SCANNER_LOGS[:-MAX_SCANNER_LOGS]
