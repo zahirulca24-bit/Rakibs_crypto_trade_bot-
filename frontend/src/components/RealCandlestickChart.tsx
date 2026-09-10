@@ -33,7 +33,6 @@ export default function RealCandlestickChart({ candles }: Props) {
 
     const chart = createChart(containerRef.current, {
       autoSize: true,
-      attributionLogo: true,
       layout: {
         background: { type: ColorType.Solid, color: "#0b1118" },
         textColor: "#8ea0b8",
@@ -94,5 +93,25 @@ export default function RealCandlestickChart({ candles }: Props) {
     if (data.length) chart.timeScale().fitContent();
   }, [candles]);
 
-  return <div ref={containerRef} style={{ width: "100%", height: "100%", minHeight: 420 }} />;
+  return (
+    <div style={{ width: "100%", height: "100%", minHeight: 420, position: "relative" }}>
+      <div ref={containerRef} style={{ width: "100%", height: "100%", minHeight: 420 }} />
+      <a
+        href="https://www.tradingview.com/"
+        target="_blank"
+        rel="noreferrer"
+        style={{
+          position: "absolute",
+          left: 10,
+          bottom: 8,
+          fontSize: 10,
+          color: "#6f8198",
+          textDecoration: "none",
+          zIndex: 2,
+        }}
+      >
+        Charting by TradingView
+      </a>
+    </div>
+  );
 }
