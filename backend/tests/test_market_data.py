@@ -1,4 +1,4 @@
-import pytest
+import asyncio
 
 from app.market_data.service import MarketDataService
 
@@ -30,24 +30,21 @@ class FakeBinanceClient:
         }
 
 
-@pytest.mark.asyncio
-async def test_price_normalizes_symbol():
+def test_price_normalizes_symbol():
     service = MarketDataService(client=FakeBinanceClient())
-    result = await service.price("btc/usdt")
+    result = asyncio.run(service.price("btc/usdt"))
     assert result == {"symbol": "BTCUSDT", "price": "67842.10"}
 
 
-@pytest.mark.asyncio
-async def test_klines_are_normalized():
+def test_klines_are_normalized():
     service = MarketDataService(client=FakeBinanceClient())
-    result = await service.klines("btc-usdt", "1h", 1)
+    result = asyncio.run(service.klines("btc-usdt", "1h", 1))
     assert result["symbol"] == "BTCUSDT"
     assert result["candles"][0]["close"] == "11"
 
 
-@pytest.mark.asyncio
-async def test_order_book_is_normalized():
+def test_order_book_is_normalized():
     service = MarketDataService(client=FakeBinanceClient())
-    result = await service.order_book("BTCUSDT", 5)
+    result = asyncio.run(service.order_book("BTCUSDT", 5))
     assert result["last_update_id"] == 42
     assert result["bids"][0] == {"price": "10", "quantity": "2"}
