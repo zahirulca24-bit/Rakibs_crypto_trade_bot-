@@ -6,7 +6,7 @@ type IndicatorLog={timestamp:string;engine:string;symbol:string;timeframe:string
 type Candidate={symbol:string;side:"LONG"|"SHORT";score:number;quote_volume:number;last_price:number;structure_1h?:string;rsi_1h?:number;rvol_1h?:number;atr_pct_1h?:number;oi_change_1h_pct?:number;spread_pct?:number;reasons:string[]};
 type StageDiag={passed:number;dropped:number;passed_symbols:string[];dropped_symbols:string[]};
 type ScannerRun={timestamp:string;engine:string;version?:string;status:string;candidate_count:number;long_candidates:number;short_candidates:number;hold_count?:number;processing_ms:number;pipeline?:{scan_pool?:StageDiag;trend_1h?:StageDiag;participation?:StageDiag;top_30?:StageDiag;setup_15m?:StageDiag;entry_5m?:StageDiag;final?:StageDiag};candidates:Candidate[]};
-type WorkerStatus={running:boolean;interval_seconds:number;architecture?:string;scan_pool_limit:number;top_limit:number;min_quote_volume:number;last_started_at?:string|null;last_finished_at?:string|null;last_error?:string|null;last_candidate_count:number;last_long_candidates:number;last_short_candidates:number;last_scan_pool:number;last_trend_passed:number;last_top30:number;run_count:number};
+type WorkerStatus={running:boolean;interval_seconds:number;architecture?:string;schedule?:{trend:string;setup:string;entry:string};scan_pool_limit:number;top_limit:number;min_quote_volume:number;last_started_at?:string|null;last_finished_at?:string|null;last_error?:string|null;last_candidate_count:number;last_long_candidates:number;last_short_candidates:number;last_scan_pool:number;last_trend_passed:number;last_top30:number;last_layer?:string;rate_limited?:boolean;retry_in_seconds?:number;run_count:number};
 type CandlePayload={open_time:number;open:string;high:string;low:string;close:string;volume:string;close_time:number};
 
 const FUTURES_API="https://fapi.binance.com";
@@ -47,7 +47,7 @@ export default function EngineWorkingLogPage(){
   </details>
 
   <details className="panel" open style={detailsStyle}>
-   <summary style={summaryStyle}><div><p className="eyebrow">2. Engine</p><strong>Futures Scanner Engine</strong><div className="muted" style={{fontSize:10,marginTop:4}}>{worker?.running?("Python loop every "+worker.interval_seconds+"s"):"Worker not running"} · MTF v1</div></div><span className="periodTag">Open log ▾</span></summary>
+   <summary style={summaryStyle}><div><p className="eyebrow">2. Engine</p><strong>Futures Scanner Engine</strong><div className="muted" style={{fontSize:10,marginTop:4}}>{worker?.running?("Scheduler active · "+(worker.last_layer??"startup")):"Worker not running"} · MTF v1</div></div><span className="periodTag">Open log ▾</span></summary>
    <div style={bodyStyle}>
     <div style={{display:"grid",gridTemplateColumns:"repeat(5,minmax(0,1fr))",gap:10,marginBottom:12}}>
      <div style={miniCard}><span>Worker</span><strong className={worker?.running?"positive":"negative"}>{worker?.running?"RUNNING":"STOPPED"}</strong></div>
@@ -56,8 +56,8 @@ export default function EngineWorkingLogPage(){
      <div style={miniCard}><span>1H Trend</span><strong>{worker?.last_trend_passed??latest?.pipeline?.trend_1h?.passed??0}</strong></div>
      <div style={miniCard}><span>Top 30</span><strong>{worker?.last_top30??latest?.pipeline?.top_30?.passed??0}</strong></div>
     </div>
-    {worker?.last_error&&<div className="negative" style={{marginBottom:10,fontSize:11}}>Worker error: {worker.last_error}</div>}
-    <div style={{...toolbarStyle,justifyContent:"space-between"}}><span className="muted">1H EMA20/50/200 + structure, RVOL/ATR/RSI/OI/spread → Top30 → 15m setup → 5m entry.</span><div style={{display:"flex",gap:8}}><button style={buttonStyle} onClick={()=>void loadScanner()}>Refresh</button><button style={buttonStyle} onClick={downloadScanner} disabled={!scannerLogs.length}>Download CSV</button></div></div>
+    {worker?.rate_limited&&<div className="negative" style={{marginBottom:10,fontSize:11}}>Binance cooldown active · retry in {worker.retry_in_seconds??0}s</div>}{worker?.last_error&&<div className="negative" style={{marginBottom:10,fontSize:11}}>Worker error: {worker.last_error}</div>}
+    <div style={{...toolbarStyle,justifyContent:"space-between"}}><span className="muted">Cached scheduler: new 1H candle → trend/quality; new 15m candle → setup; new 5m candle → entry. OI only after 1H trend pass.</span><div style={{display:"flex",gap:8}}><button style={buttonStyle} onClick={()=>void loadScanner()}>Refresh</button><button style={buttonStyle} onClick={downloadScanner} disabled={!scannerLogs.length}>Download CSV</button></div></div>
     <div style={{overflow:"auto"}}><div style={{minWidth:1220}}><div style={{...scannerRow,...headStyle}}><span>Time</span><span>Pool</span><span>1H Trend</span><span>Top30</span><span>15m Setup</span><span>5m Entry</span><span>LONG</span><span>SHORT</span><span>HOLD</span><span>ms</span></div>{scannerLogs.slice(0,50).map((x,i)=><div key={x.timestamp+"-"+i} style={scannerRow}><span>{new Date(x.timestamp).toLocaleString()}</span><span>{x.pipeline?.scan_pool?.passed??0}</span><span>{x.pipeline?.trend_1h?.passed??0}</span><span>{x.pipeline?.top_30?.passed??0}</span><span>{x.pipeline?.setup_15m?.passed??0}</span><span>{x.pipeline?.entry_5m?.passed??0}</span><span className="positive">{x.long_candidates??0}</span><span className="negative">{x.short_candidates??0}</span><span>{x.hold_count??0}</span><span>{n(x.processing_ms,2)}</span></div>)}</div></div>
    </div>
   </details>
