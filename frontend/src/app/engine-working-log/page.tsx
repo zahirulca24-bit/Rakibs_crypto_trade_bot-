@@ -37,7 +37,10 @@ type CandlePayload = {
 type ScannerCandidate = {
   symbol: string;
   timeframe: string;
+  side: "LONG" | "SHORT";
   score: number;
+  long_score: number;
+  short_score: number;
   quote_volume: number;
   last_price: number;
   rsi_14: number;
@@ -60,6 +63,8 @@ type ScannerRun = {
   input_markets: number;
   evaluated_markets: number;
   candidate_count: number;
+  long_candidates?: number;
+  short_candidates?: number;
   processing_ms: number;
   candidates: ScannerCandidate[];
 };
@@ -208,7 +213,7 @@ export default function EngineWorkingLogPage() {
         for (const result of results) if (result.status === "fulfilled") markets.push(result.value);
       }
 
-      setScanProgress("Ranking candidates…");
+      setScanProgress("Ranking LONG + SHORT candidates…");
       const response = await fetch(`/api/scanner/run?timeframe=${timeframe}&min_quote_volume=${MIN_QUOTE_VOLUME}`, {
         method: "POST", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(markets),
       });
@@ -235,8 +240,8 @@ export default function EngineWorkingLogPage() {
 
   const downloadScannerCsv = () => {
     const candidates = scannerLogs.flatMap((run) => run.candidates.map((candidate) => ({ timestamp: run.timestamp, ...candidate })));
-    const header = "timestamp,symbol,timeframe,score,quote_volume,last_price,rsi_14,macd,macd_signal,volume_ratio,reasons";
-    const csv = [header, ...candidates.map((row) => [row.timestamp, row.symbol, row.timeframe, row.score, row.quote_volume, row.last_price, row.rsi_14, row.macd, row.macd_signal, row.volume_ratio, `"${row.reasons.join(" | ").replaceAll('"', '""')}"`].join(","))].join("\n");
+    const header = "timestamp,symbol,timeframe,side,score,long_score,short_score,quote_volume,last_price,rsi_14,macd,macd_signal,volume_ratio,reasons";
+    const csv = [header, ...candidates.map((row) => [row.timestamp, row.symbol, row.timeframe, row.side, row.score, row.long_score, row.short_score, row.quote_volume, row.last_price, row.rsi_14, row.macd, row.macd_signal, row.volume_ratio, `"${row.reasons.join(" | ").replaceAll('"', '""')}"`].join(","))].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `scanner-engine-log-${today}.csv`; anchor.click(); URL.revokeObjectURL(url);
   };
@@ -275,23 +280,23 @@ export default function EngineWorkingLogPage() {
       </section>
 
       <section className="panel" style={{ padding: 18, marginBottom: 14 }}>
-        <div className="panelHead" style={{ marginBottom: 14 }}><div><p className="eyebrow">2. Engine</p><h2>Scanner Engine Log</h2></div><span className="periodTag">v1 · shortlist only</span></div>
+        <div className="panelHead" style={{ marginBottom: 14 }}><div><p className="eyebrow">2. Engine</p><h2>Scanner Engine Log</h2></div><span className="periodTag">v2 · LONG + SHORT shortlist</span></div>
         <div style={{ display: "flex", gap: 10, alignItems: "end", flexWrap: "wrap" }}>
           <label style={labelStyle}>Timeframe<br /><select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} style={inputStyle}>{timeframes.map((item) => <option key={item}>{item}</option>)}</select></label>
           <button type="button" onClick={runScanner} disabled={scanning} style={runButtonStyle}>{scanning ? "Scanning…" : "Run Scanner Engine"}</button>
           <button type="button" onClick={downloadScannerCsv} disabled={!scannerLogs.length} style={buttonStyle}>Download Scanner CSV</button>
-          <span className="muted">Active USDT/USDC/FDUSD Spot pairs · 24h quote volume ≥ $10M · top {SCAN_LIMIT} liquid pairs · candidate score ≥ 50.</span>
+          <span className="muted">Active USDT/USDC/FDUSD Spot pairs · 24h quote volume ≥ $10M · top {SCAN_LIMIT} liquid pairs · volume ≥ 1.5x · LONG/SHORT score ≥ 50.</span>
         </div>
         {scanProgress && <p className="positive" style={{ marginBottom: 0 }}>{scanProgress}</p>}
         {scannerError && <p className="negative" style={{ marginBottom: 0 }}>{scannerError}</p>}
       </section>
 
       <section className="panel" style={{ overflow: "auto" }}>
-        <div className="panelHead compact"><h2>Scanner Candidates</h2><span className="periodTag">{scannerLoading ? "Loading…" : latestScanner ? `${latestScanner.candidate_count} candidates / ${latestScanner.evaluated_markets} evaluated` : "0 runs"}</span></div>
-        <div style={{ minWidth: 1100 }}>
-          <div style={{ ...scannerRowStyle, color: "#69768a", fontSize: 9, textTransform: "uppercase" }}><span>Symbol</span><span>TF</span><span>Score</span><span>24h Quote Vol</span><span>Price</span><span>RSI</span><span>MACD</span><span>Signal</span><span>Vol Ratio</span><span>Reasons</span></div>
+        <div className="panelHead compact"><h2>Scanner Candidates</h2><span className="periodTag">{scannerLoading ? "Loading…" : latestScanner ? `${latestScanner.candidate_count} total · ${latestScanner.long_candidates ?? 0} LONG · ${latestScanner.short_candidates ?? 0} SHORT / ${latestScanner.evaluated_markets} evaluated` : "0 runs"}</span></div>
+        <div style={{ minWidth: 1220 }}>
+          <div style={{ ...scannerRowStyle, color: "#69768a", fontSize: 9, textTransform: "uppercase" }}><span>Symbol</span><span>TF</span><span>Side</span><span>Score</span><span>L/S Score</span><span>24h Quote Vol</span><span>Price</span><span>RSI</span><span>MACD</span><span>Signal</span><span>Vol Ratio</span><span>Reasons</span></div>
           {!scannerLoading && !latestScanner && <div style={emptyStyle}>No Scanner Engine run yet. Run Scanner Engine above.</div>}
-          {latestScanner?.candidates.map((row) => <div key={row.symbol} style={scannerRowStyle}><strong>{row.symbol}</strong><span>{row.timeframe}</span><strong className={row.score >= 70 ? "positive" : "neutral"}>{row.score}</strong><span>${number(row.quote_volume, 0)}</span><span>{number(row.last_price)}</span><span>{number(row.rsi_14, 2)}</span><span>{number(row.macd)}</span><span>{number(row.macd_signal)}</span><span>{number(row.volume_ratio, 2)}x</span><span title={row.reasons.join(" · ")}>{row.reasons.join(" · ") || "—"}</span></div>)}
+          {latestScanner?.candidates.map((row) => <div key={`${row.symbol}-${row.side}`} style={scannerRowStyle}><strong>{row.symbol}</strong><span>{row.timeframe}</span><strong className={row.side === "LONG" ? "positive" : "negative"}>{row.side}</strong><strong className={row.score >= 70 ? "positive" : "neutral"}>{row.score}</strong><span>{row.long_score}/{row.short_score}</span><span>${number(row.quote_volume, 0)}</span><span>{number(row.last_price)}</span><span>{number(row.rsi_14, 2)}</span><span>{number(row.macd)}</span><span>{number(row.macd_signal)}</span><span>{number(row.volume_ratio, 2)}x</span><span title={row.reasons.join(" · ")}>{row.reasons.join(" · ") || "—"}</span></div>)}
         </div>
       </section>
     </div>
@@ -304,4 +309,4 @@ const buttonStyle = { ...inputStyle, cursor: "pointer" } as const;
 const runButtonStyle = { ...buttonStyle, background: "#173329", color: "#69e4b8", border: "1px solid #285845", fontWeight: 700 } as const;
 const emptyStyle = { padding: 28, color: "#78859a", fontSize: 12 } as const;
 const rowStyle = { display: "grid", gridTemplateColumns: "150px 90px 45px 70px repeat(5, 95px) 70px repeat(3, 95px) 80px 70px", gap: 10, padding: "10px 14px", borderBottom: "1px solid #171f2a", fontSize: 10, alignItems: "center" } as const;
-const scannerRowStyle = { display: "grid", gridTemplateColumns: "100px 45px 55px 120px 100px 65px 90px 90px 75px minmax(320px, 1fr)", gap: 10, padding: "10px 14px", borderBottom: "1px solid #171f2a", fontSize: 10, alignItems: "center" } as const;
+const scannerRowStyle = { display: "grid", gridTemplateColumns: "100px 45px 60px 55px 70px 120px 100px 65px 90px 90px 75px minmax(320px, 1fr)", gap: 10, padding: "10px 14px", borderBottom: "1px solid #171f2a", fontSize: 10, alignItems: "center" } as const;
