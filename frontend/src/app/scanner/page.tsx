@@ -83,7 +83,7 @@ export default function ScannerPage(){
      <span className="periodTag">{worker?.last_layer??"startup"}</span>
      {worker?.rate_limited?<span className="periodTag">Retry in {duration(cooldown)}</span>:<span className="periodTag">Next 1H scan {duration(nextScan)}</span>}
      <span className="periodTag">Top30 {worker?.last_top30??latest?.pipeline?.top_30?.passed??0}</span>
-     <button onClick={()=>void runNow()} disabled={scanning||worker?.rate_limited} style={runStyle}>{worker?.rate_limited?"Cooldown":scanning?"Scanning…":"Run 1H Now"}</button>
+     <button onClick={()=>void runNow()} disabled={scanning||worker?.rate_limited} style={manualRunStyle}>{worker?.rate_limited?"Cooldown":scanning?"Scanning…":"Run 1H Now"}</button>
      <button onClick={()=>void load()} style={controlStyle}>Refresh</button>
     </div>
    </div>
