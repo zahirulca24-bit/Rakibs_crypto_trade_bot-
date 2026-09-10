@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from time import perf_counter
+from time import perf_counter, time
 from typing import Any
 
 from app.market_data.service import MarketDataService
 
 EMA_PERIODS = (9, 20, 21, 50, 200)
 MAX_LOGS = 5000
+MIN_CANDLES = 200
 INDICATOR_LOGS: list[dict[str, Any]] = []
 
 
@@ -65,19 +66,41 @@ def _rsi(values: list[float], period: int = 14) -> float:
     return 100 - (100 / (1 + rs))
 
 
+def closed_candles(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize valid candles and exclude a still-forming candle when close_time is supplied."""
+    now_ms = int(time() * 1000)
+    normalized: list[dict[str, Any]] = []
+    for candle in candles:
+        try:
+            float(candle["close"])
+            float(candle["volume"])
+            close_time = int(candle.get("close_time", 0) or 0)
+            open_time = int(candle.get("open_time", 0) or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if close_time and close_time > now_ms:
+            continue
+        normalized.append({**candle, "open_time": open_time, "close_time": close_time})
+    normalized.sort(key=lambda item: int(item.get("open_time", 0)))
+    return normalized
+
+
 class IndicatorEngine:
     def __init__(self, market_data: MarketDataService | None = None) -> None:
         self.market_data = market_data or MarketDataService()
 
     def calculate(self, symbol: str, timeframe: str, candles: list[dict[str, Any]]) -> dict[str, Any]:
         started = perf_counter()
-        normalized = self.market_data.normalize_symbol(symbol)
+        normalized_symbol = self.market_data.normalize_symbol(symbol)
         timestamp = datetime.now(timezone.utc).isoformat()
         try:
-            closes = [float(item["close"]) for item in candles]
-            volumes = [float(item["volume"]) for item in candles]
-            if len(closes) < 200:
-                raise ValueError("Indicator Engine requires at least 200 candles")
+            usable = closed_candles(candles)
+            closes = [float(item["close"]) for item in usable]
+            volumes = [float(item["volume"]) for item in usable]
+            if len(closes) < MIN_CANDLES:
+                raise ValueError(f"Indicator Engine requires at least {MIN_CANDLES} closed candles")
+            if len(volumes) < 21:
+                raise ValueError("Indicator Engine requires at least 21 closed volume candles")
 
             emas = {period: _ema(closes, period)[-1] for period in EMA_PERIODS}
             ema12 = _ema(closes, 12)
@@ -86,14 +109,16 @@ class IndicatorEngine:
             signal_values = _ema(macd_values, 9)
             macd = macd_values[-1]
             signal = signal_values[-1]
+
             current_volume = volumes[-1]
-            avg_volume_20 = sum(volumes[-20:]) / min(20, len(volumes))
-            volume_ratio = current_volume / avg_volume_20 if avg_volume_20 else 0.0
+            previous_20 = volumes[-21:-1]
+            avg_volume_20 = sum(previous_20) / len(previous_20)
+            volume_ratio = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0.0
 
             result = IndicatorResult(
                 timestamp=timestamp,
                 engine="Indicator Engine",
-                symbol=normalized,
+                symbol=normalized_symbol,
                 timeframe=timeframe,
                 status="success",
                 ema_9=round(emas[9], 8),
@@ -118,7 +143,7 @@ class IndicatorEngine:
             log = {
                 "timestamp": timestamp,
                 "engine": "Indicator Engine",
-                "symbol": normalized,
+                "symbol": normalized_symbol,
                 "timeframe": timeframe,
                 "status": "error",
                 "error": str(exc),
