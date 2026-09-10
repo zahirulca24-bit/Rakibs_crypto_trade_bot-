@@ -7,10 +7,15 @@ async function proxy(request: Request, path: string[], method: "GET" | "POST") {
   targetUrl.search = incomingUrl.search;
 
   try {
+    const requestBody = method === "POST" ? await request.text() : undefined;
     const response = await fetch(targetUrl, {
       method,
       cache: "no-store",
-      headers: { accept: "application/json" },
+      headers: {
+        accept: "application/json",
+        ...(requestBody ? { "content-type": request.headers.get("content-type") ?? "application/json" } : {}),
+      },
+      body: requestBody || undefined,
     });
     const body = await response.text();
 
