@@ -8,6 +8,7 @@ const navItems = [
   { label: "Market Watch", href: "/market-watch", icon: "⌁" },
   { label: "Scanner", href: "/scanner", icon: "◎" },
   { label: "Strategy & Signal", href: "/strategy-signal", icon: "⇄" },
+  { label: "Trade Execution", href: "/trade-execution", icon: "⚡" },
   { label: "Engine Working Log", href: "/engine-working-log", icon: "≋" },
 ];
 
@@ -16,7 +17,7 @@ export default function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <style>{`@media(max-width:760px){.navList{grid-template-columns:repeat(5,minmax(0,1fr))}}`}</style>
+      <style>{`@media(max-width:760px){.navList{grid-template-columns:repeat(6,minmax(0,1fr))}}`}</style>
       <div className="brand">
         <div className="brandMark">R</div>
         <div>
