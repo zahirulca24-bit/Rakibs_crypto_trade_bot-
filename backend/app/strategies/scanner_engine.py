@@ -173,23 +173,21 @@ class ScannerEngine:
         )
         return ranked
 
-    def evaluate_setup_entry(self, row: dict[str, Any]) -> dict[str, Any]:
+    def evaluate_setup_15m(self, row: dict[str, Any]) -> dict[str, Any]:
         symbol = str(row["symbol"])
         side = str(row["trend_side"])
         c15 = closed_candles(row.get("candles_15m") or [])
-        c5 = closed_candles(row.get("candles_5m") or [])
-        if len(c15) < MIN_CLOSED_CANDLES or len(c5) < MIN_CLOSED_CANDLES:
-            return {**row, "decision": "HOLD", "hold_reason": "insufficient 15m/5m candles"}
+        if len(c15) < MIN_CLOSED_CANDLES:
+            return {**row, "setup_15m": False, "hold_reason": "insufficient 15m candles"}
 
         i15 = self.indicator_engine.calculate(symbol, "15m", c15, log_result=False)
-        i5 = self.indicator_engine.calculate(symbol, "5m", c5, log_result=False)
-
         close15 = float(c15[-1]["close"])
         ema20_15 = float(i15["ema_20"])
         ema50_15 = float(i15["ema_50"])
         macd15 = float(i15["macd"])
         signal15 = float(i15["macd_signal"])
         recent15 = c15[-3:]
+
         setup_long = (
             side == "LONG"
             and ema20_15 > ema50_15
@@ -205,24 +203,33 @@ class ScannerEngine:
             and macd15 < signal15
         )
         setup_ok = setup_long or setup_short
-        if not setup_ok:
-            return {
-                **row,
-                "decision": "HOLD",
-                "setup_15m": False,
-                "entry_5m": False,
-                "hold_reason": "15m EMA20/50 pullback + MACD setup not confirmed",
-                "ema20_15m": ema20_15,
-                "ema50_15m": ema50_15,
-                "macd_15m": macd15,
-                "macd_signal_15m": signal15,
-            }
+        return {
+            **row,
+            "setup_15m": setup_ok,
+            "ema20_15m": ema20_15,
+            "ema50_15m": ema50_15,
+            "macd_15m": macd15,
+            "macd_signal_15m": signal15,
+            "hold_reason": None if setup_ok else "15m EMA20/50 pullback + MACD setup not confirmed",
+        }
 
+    def evaluate_entry_5m(self, row: dict[str, Any]) -> dict[str, Any]:
+        if not row.get("setup_15m"):
+            return {**row, "decision": "HOLD", "entry_5m": False}
+
+        symbol = str(row["symbol"])
+        side = str(row["trend_side"])
+        c5 = closed_candles(row.get("candles_5m") or [])
+        if len(c5) < MIN_CLOSED_CANDLES:
+            return {**row, "decision": "HOLD", "entry_5m": False, "hold_reason": "insufficient 5m candles"}
+
+        i5 = self.indicator_engine.calculate(symbol, "5m", c5, log_result=False)
         close5 = float(c5[-1]["close"])
         open5 = float(c5[-1]["open"])
         ema9_5 = float(i5["ema_9"])
         ema21_5 = float(i5["ema_21"])
         cross_recent = _recent_cross(c5, side == "LONG")
+
         if side == "LONG":
             entry_ok = ema9_5 > ema21_5 and close5 > ema9_5 and close5 > open5
         else:
@@ -232,13 +239,8 @@ class ScannerEngine:
             return {
                 **row,
                 "decision": "HOLD",
-                "setup_15m": True,
                 "entry_5m": False,
                 "hold_reason": "5m EMA9/21 + candle confirmation not ready",
-                "ema20_15m": ema20_15,
-                "ema50_15m": ema50_15,
-                "macd_15m": macd15,
-                "macd_signal_15m": signal15,
                 "ema9_5m": ema9_5,
                 "ema21_5m": ema21_5,
                 "entry_cross_recent": cross_recent,
@@ -256,18 +258,20 @@ class ScannerEngine:
             **row,
             "decision": side,
             "score": score,
-            "setup_15m": True,
             "entry_5m": True,
-            "ema20_15m": ema20_15,
-            "ema50_15m": ema50_15,
-            "macd_15m": macd15,
-            "macd_signal_15m": signal15,
             "ema9_5m": ema9_5,
             "ema21_5m": ema21_5,
             "rsi_5m": float(i5["rsi_14"]),
             "entry_cross_recent": cross_recent,
             "reasons": reasons,
+            "hold_reason": None,
         }
+
+    def evaluate_setup_entry(self, row: dict[str, Any]) -> dict[str, Any]:
+        setup = self.evaluate_setup_15m(row)
+        if not setup.get("setup_15m"):
+            return {**setup, "decision": "HOLD", "entry_5m": False}
+        return self.evaluate_entry_5m(setup)
 
     def build_result(
         self,
