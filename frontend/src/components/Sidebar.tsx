@@ -15,6 +15,7 @@ export default function Sidebar() {
 
   return (
     <aside className="sidebar">
+      <style>{`@media(max-width:760px){.navList{grid-template-columns:repeat(4,minmax(0,1fr))}}`}</style>
       <div className="brand">
         <div className="brandMark">R</div>
         <div>
