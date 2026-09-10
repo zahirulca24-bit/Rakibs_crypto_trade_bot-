@@ -171,7 +171,7 @@ class ScannerEngine:
             ),
             reverse=True,
         )
-        return ranked[:TOP_LIMIT]
+        return ranked
 
     def evaluate_setup_entry(self, row: dict[str, Any]) -> dict[str, Any]:
         symbol = str(row["symbol"])
