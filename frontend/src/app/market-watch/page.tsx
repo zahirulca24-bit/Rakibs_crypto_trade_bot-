@@ -28,7 +28,6 @@ type BinanceSymbol = {
 };
 
 type ExchangeInfo = { symbols: BinanceSymbol[] };
-
 type Interval = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 
 const HISTORY_LIMIT = 500;
@@ -303,11 +302,14 @@ export default function MarketWatchPage() {
               ))}
             </div>
             <div className="toolbarGroup">
+              <span className="periodTag">EMA 9 · 20 · 21 · 50 · 200</span>
+              <span className="periodTag">RSI 14</span>
+              <span className="periodTag">MACD 12/26/9</span>
               <span className="periodTag">{historyLoading ? "Loading candles…" : `${candles.length} bars`}</span>
               <span className="periodTag">{connected ? "WS Live" : "Connecting…"}</span>
             </div>
           </div>
-          <div className="priceChart" style={{ height: 520, minHeight: 520 }}>
+          <div className="priceChart" style={{ height: 815, minHeight: 815, overflow: "hidden" }}>
             <RealCandlestickChart candles={candles} />
           </div>
           <div className="indicatorPanel">
