@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
-from app.strategies.indicator_engine import IndicatorEngine, _ema, closed_candles
+from app.strategies.indicator_engine import IndicatorEngine, closed_candles
 
 MAX_SCANNER_LOGS = 2000
 SCANNER_LOGS: list[dict[str, Any]] = []
@@ -63,27 +63,11 @@ def _market_structure(candles: list[dict[str, Any]], window: int = 40, span: int
     return "MIXED"
 
 
-def _recent_cross(candles: list[dict[str, Any]], long_side: bool) -> bool:
-    usable = closed_candles(candles)
-    closes = [float(item["close"]) for item in usable]
-    if len(closes) < 30:
-        return False
-    ema9 = _ema(closes, 9)
-    ema21 = _ema(closes, 21)
-    start = max(1, len(closes) - 4)
-    for i in range(start, len(closes)):
-        if long_side and ema9[i] > ema21[i] and ema9[i - 1] <= ema21[i - 1]:
-            return True
-        if not long_side and ema9[i] < ema21[i] and ema9[i - 1] >= ema21[i - 1]:
-            return True
-    return False
-
-
 class ScannerEngine:
-    """Multi-timeframe USD-M futures scanner.
+    """1H-only USD-M futures scanner.
 
-    1H decides trend, 15m validates setup, 5m confirms entry.
-    OI/spread/ATR/RSI/RVOL are quality/participation inputs, not duplicated legacy gates.
+    Scanner ownership ends at Top 30.
+    Strategy/entry/risk/position engines are separate downstream components.
     """
 
     def __init__(self, indicator_engine: IndicatorEngine | None = None) -> None:
@@ -94,6 +78,7 @@ class ScannerEngine:
         candles = closed_candles(market.get("candles_1h") or [])
         if len(candles) < MIN_CLOSED_CANDLES:
             return None
+
         ind = self.indicator_engine.calculate(symbol, "1h", candles, log_result=False)
         close = float(candles[-1]["close"])
         structure = _market_structure(candles)
@@ -108,21 +93,24 @@ class ScannerEngine:
         short_trend = close < ema20 < ema50 < ema200 and structure == "LH_LL"
         if not long_trend and not short_trend:
             return None
-        side = "LONG" if long_trend else "SHORT"
 
+        side = "LONG" if long_trend else "SHORT"
         score = 50
         reasons = [
             f"1H {structure}",
             "1H EMA20 > EMA50 > EMA200" if side == "LONG" else "1H EMA20 < EMA50 < EMA200",
         ]
+
         if (side == "LONG" and 50 <= rsi <= 70) or (side == "SHORT" and 30 <= rsi < 50):
             score += 15
             reasons.append(f"1H RSI {rsi:.1f} confirms trend")
+
         if rvol >= 1.10:
             score += 10
             reasons.append(f"1H RVOL {rvol:.2f}x")
         elif rvol >= 0.90:
             score += 5
+
         if 0.30 <= atr_pct <= 6.0:
             score += 10
             reasons.append(f"1H ATR {atr_pct:.2f}% healthy")
@@ -148,21 +136,30 @@ class ScannerEngine:
             spread_pct = float(row.get("spread_pct", 999.0))
             if spread_pct > MAX_SPREAD_PCT:
                 continue
+
             oi_change = float(row.get("oi_change_1h_pct", 0.0))
             quality = int(row["trend_score"])
             reasons = list(row["trend_reasons"])
+
             if spread_pct <= 0.05:
                 quality += 10
                 reasons.append(f"Spread {spread_pct:.3f}%")
             elif spread_pct <= 0.10:
                 quality += 5
+
             if oi_change >= 0.50:
                 quality += 15
                 reasons.append(f"OI +{oi_change:.2f}% / 1H")
             elif oi_change > 0:
                 quality += 8
                 reasons.append(f"OI rising {oi_change:.2f}% / 1H")
-            ranked.append({**row, "quality_score": quality, "quality_reasons": reasons})
+
+            ranked.append({
+                **row,
+                "quality_score": quality,
+                "quality_reasons": reasons,
+            })
+
         ranked.sort(
             key=lambda item: (
                 int(item["quality_score"]),
@@ -173,106 +170,6 @@ class ScannerEngine:
         )
         return ranked
 
-    def evaluate_setup_15m(self, row: dict[str, Any]) -> dict[str, Any]:
-        symbol = str(row["symbol"])
-        side = str(row["trend_side"])
-        c15 = closed_candles(row.get("candles_15m") or [])
-        if len(c15) < MIN_CLOSED_CANDLES:
-            return {**row, "setup_15m": False, "hold_reason": "insufficient 15m candles"}
-
-        i15 = self.indicator_engine.calculate(symbol, "15m", c15, log_result=False)
-        close15 = float(c15[-1]["close"])
-        ema20_15 = float(i15["ema_20"])
-        ema50_15 = float(i15["ema_50"])
-        macd15 = float(i15["macd"])
-        signal15 = float(i15["macd_signal"])
-        recent15 = c15[-3:]
-
-        setup_long = (
-            side == "LONG"
-            and ema20_15 > ema50_15
-            and min(float(c["low"]) for c in recent15) <= ema20_15 * 1.01
-            and close15 > ema20_15
-            and macd15 > signal15
-        )
-        setup_short = (
-            side == "SHORT"
-            and ema20_15 < ema50_15
-            and max(float(c["high"]) for c in recent15) >= ema20_15 * 0.99
-            and close15 < ema20_15
-            and macd15 < signal15
-        )
-        setup_ok = setup_long or setup_short
-        return {
-            **row,
-            "setup_15m": setup_ok,
-            "ema20_15m": ema20_15,
-            "ema50_15m": ema50_15,
-            "macd_15m": macd15,
-            "macd_signal_15m": signal15,
-            "hold_reason": None if setup_ok else "15m EMA20/50 pullback + MACD setup not confirmed",
-        }
-
-    def evaluate_entry_5m(self, row: dict[str, Any]) -> dict[str, Any]:
-        if not row.get("setup_15m"):
-            return {**row, "decision": "HOLD", "entry_5m": False}
-
-        symbol = str(row["symbol"])
-        side = str(row["trend_side"])
-        c5 = closed_candles(row.get("candles_5m") or [])
-        if len(c5) < MIN_CLOSED_CANDLES:
-            return {**row, "decision": "HOLD", "entry_5m": False, "hold_reason": "insufficient 5m candles"}
-
-        i5 = self.indicator_engine.calculate(symbol, "5m", c5, log_result=False)
-        close5 = float(c5[-1]["close"])
-        open5 = float(c5[-1]["open"])
-        ema9_5 = float(i5["ema_9"])
-        ema21_5 = float(i5["ema_21"])
-        cross_recent = _recent_cross(c5, side == "LONG")
-
-        if side == "LONG":
-            entry_ok = ema9_5 > ema21_5 and close5 > ema9_5 and close5 > open5
-        else:
-            entry_ok = ema9_5 < ema21_5 and close5 < ema9_5 and close5 < open5
-
-        if not entry_ok:
-            return {
-                **row,
-                "decision": "HOLD",
-                "entry_5m": False,
-                "hold_reason": "5m EMA9/21 + candle confirmation not ready",
-                "ema9_5m": ema9_5,
-                "ema21_5m": ema21_5,
-                "entry_cross_recent": cross_recent,
-            }
-
-        score = int(row["quality_score"]) + 20 + (10 if cross_recent else 5)
-        reasons = list(row["quality_reasons"]) + [
-            "15m setup confirmed",
-            "5m EMA9/21 entry confirmed",
-        ]
-        if cross_recent:
-            reasons.append("5m recent EMA crossover")
-
-        return {
-            **row,
-            "decision": side,
-            "score": score,
-            "entry_5m": True,
-            "ema9_5m": ema9_5,
-            "ema21_5m": ema21_5,
-            "rsi_5m": float(i5["rsi_14"]),
-            "entry_cross_recent": cross_recent,
-            "reasons": reasons,
-            "hold_reason": None,
-        }
-
-    def evaluate_setup_entry(self, row: dict[str, Any]) -> dict[str, Any]:
-        setup = self.evaluate_setup_15m(row)
-        if not setup.get("setup_15m"):
-            return {**setup, "decision": "HOLD", "entry_5m": False}
-        return self.evaluate_entry_5m(setup)
-
     def build_result(
         self,
         *,
@@ -280,74 +177,56 @@ class ScannerEngine:
         trend_rows: list[dict[str, Any]],
         participation_rows: list[dict[str, Any]],
         top_rows: list[dict[str, Any]],
-        decisions: list[dict[str, Any]],
         started: float,
     ) -> dict[str, Any]:
         trend_symbols = [str(row["symbol"]) for row in trend_rows]
         participation_symbols = [str(row["symbol"]) for row in participation_rows]
         top_symbols = [str(row["symbol"]) for row in top_rows]
-        setup_symbols = [str(row["symbol"]) for row in decisions if row.get("setup_15m")]
-        entry_symbols = [str(row["symbol"]) for row in decisions if row.get("entry_5m")]
-        candidates = [row for row in decisions if row.get("decision") in {"LONG", "SHORT"}]
-        candidates.sort(key=lambda row: (int(row.get("score", 0)), float(row.get("quality_score", 0))), reverse=True)
-        long_count = sum(1 for row in candidates if row["decision"] == "LONG")
-        short_count = sum(1 for row in candidates if row["decision"] == "SHORT")
 
-        public_candidates = [
+        shortlist = [
             {
                 "symbol": row["symbol"],
-                "side": row["decision"],
-                "score": row["score"],
+                "side": row["trend_side"],
+                "score": int(row["quality_score"]),
                 "quote_volume": round(float(row.get("quote_volume", 0)), 2),
                 "last_price": round(float(row.get("last_price", 0)), 8),
                 "structure_1h": row.get("structure_1h"),
+                "ema20_1h": round(float(row.get("ema20_1h", 0)), 8),
+                "ema50_1h": round(float(row.get("ema50_1h", 0)), 8),
+                "ema200_1h": round(float(row.get("ema200_1h", 0)), 8),
                 "rsi_1h": round(float(row.get("rsi_1h", 0)), 2),
                 "rvol_1h": round(float(row.get("rvol_1h", 0)), 2),
                 "atr_pct_1h": round(float(row.get("atr_pct_1h", 0)), 3),
                 "oi_change_1h_pct": round(float(row.get("oi_change_1h_pct", 0)), 3),
                 "spread_pct": round(float(row.get("spread_pct", 0)), 4),
-                "ema20_15m": round(float(row.get("ema20_15m", 0)), 8),
-                "ema50_15m": round(float(row.get("ema50_15m", 0)), 8),
-                "ema9_5m": round(float(row.get("ema9_5m", 0)), 8),
-                "ema21_5m": round(float(row.get("ema21_5m", 0)), 8),
-                "reasons": row.get("reasons", []),
+                "reasons": row.get("quality_reasons", []),
             }
-            for row in candidates
+            for row in top_rows
         ]
+
+        long_count = sum(1 for row in shortlist if row["side"] == "LONG")
+        short_count = sum(1 for row in shortlist if row["side"] == "SHORT")
 
         result = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "engine": "Scanner Engine",
-            "version": "mtf-v1",
+            "version": "1h-v1",
             "status": "success",
             "market": "Binance USD-M Perpetual Futures",
+            "timeframe": "1h",
             "scan_pool_limit": SCAN_POOL_LIMIT,
             "top_limit": TOP_LIMIT,
-            "candidate_count": len(public_candidates),
+            "candidate_count": len(shortlist),
             "long_candidates": long_count,
             "short_candidates": short_count,
-            "hold_count": len(decisions) - len(public_candidates),
             "pipeline": {
                 "scan_pool": _stage(universe_symbols, universe_symbols),
                 "trend_1h": _stage(universe_symbols, trend_symbols),
                 "participation": _stage(trend_symbols, participation_symbols),
                 "top_30": _stage(participation_symbols, top_symbols),
-                "setup_15m": _stage(top_symbols, setup_symbols),
-                "entry_5m": _stage(setup_symbols, entry_symbols),
-                "final": _stage(entry_symbols, [row["symbol"] for row in candidates]),
             },
             "processing_ms": round((perf_counter() - started) * 1000, 2),
-            "candidates": public_candidates,
-            "decisions": [
-                {
-                    "symbol": row["symbol"],
-                    "trend_side": row.get("trend_side"),
-                    "decision": row.get("decision", "HOLD"),
-                    "hold_reason": row.get("hold_reason"),
-                    "quality_score": row.get("quality_score"),
-                }
-                for row in decisions
-            ],
+            "candidates": shortlist,
         }
         SCANNER_LOGS.append(result)
         del SCANNER_LOGS[:-MAX_SCANNER_LOGS]
