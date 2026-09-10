@@ -301,6 +301,7 @@ class FuturesScannerWorker:
         if not self._top_rows:
             self._setup_rows = []
             return
+
         semaphore = asyncio.Semaphore(4)
         loaded = await asyncio.gather(
             *(
@@ -315,19 +316,17 @@ class FuturesScannerWorker:
             if isinstance(c15, Exception):
                 if isinstance(c15, BinanceRateLimitError):
                     raise c15
-                next_top.append(row)
+                next_top.append({**row, "setup_15m": False, "hold_reason": "15m data unavailable"})
                 continue
             enriched = {**row, "candles_15m": c15}
-            next_top.append(enriched)
-            # Setup is evaluated together with entry; 5m refresh will decide exact entry.
             try:
-                placeholder_5m = row.get("candles_5m") or []
-                if placeholder_5m:
-                    decision = self.engine.evaluate_setup_entry({**enriched, "candles_5m": placeholder_5m})
-                    if decision.get("setup_15m"):
-                        setup_rows.append(enriched)
-            except Exception:
-                pass
+                evaluated = self.engine.evaluate_setup_15m(enriched)
+            except Exception as exc:
+                evaluated = {**enriched, "setup_15m": False, "hold_reason": f"15m evaluation error: {exc}"}
+            next_top.append(evaluated)
+            if evaluated.get("setup_15m"):
+                setup_rows.append(evaluated)
+
         self._top_rows = next_top
         self._setup_rows = setup_rows
         self.last_layer = "15m setup"
@@ -344,40 +343,55 @@ class FuturesScannerWorker:
                 started=started,
             )
 
-        semaphore = asyncio.Semaphore(4)
-        loaded = await asyncio.gather(
-            *(
-                self._load_klines(client, semaphore, str(row["symbol"]), "5m")
-                for row in self._top_rows
-            ),
-            return_exceptions=True,
-        )
         decisions: list[dict[str, Any]] = []
-        setup_rows: list[dict[str, Any]] = []
-        updated_top: list[dict[str, Any]] = []
-        for row, c5 in zip(self._top_rows, loaded):
-            if isinstance(c5, Exception):
-                if isinstance(c5, BinanceRateLimitError):
-                    raise c5
-                decisions.append({**row, "decision": "HOLD", "hold_reason": "5m data unavailable"})
-                updated_top.append(row)
-                continue
-            combined = {**row, "candles_5m": c5}
-            updated_top.append(combined)
-            if not row.get("candles_15m"):
-                decisions.append({**combined, "decision": "HOLD", "hold_reason": "15m setup data not ready"})
-                continue
-            try:
-                decision = self.engine.evaluate_setup_entry(combined)
-                decisions.append(decision)
-                if decision.get("setup_15m"):
-                    setup_rows.append(combined)
-            except Exception as exc:
-                decisions.append({**combined, "decision": "HOLD", "hold_reason": f"evaluation error: {exc}"})
-        self._top_rows = updated_top
-        self._setup_rows = setup_rows
-        self.last_layer = "5m entry"
+        setup_by_symbol = {str(row["symbol"]): row for row in self._setup_rows}
 
+        # Preserve HOLD decisions for Top30 contracts that did not pass the 15m setup.
+        for row in self._top_rows:
+            if str(row["symbol"]) not in setup_by_symbol:
+                decisions.append({
+                    **row,
+                    "decision": "HOLD",
+                    "entry_5m": False,
+                    "hold_reason": row.get("hold_reason") or "15m setup not confirmed",
+                })
+
+        if self._setup_rows:
+            semaphore = asyncio.Semaphore(4)
+            loaded = await asyncio.gather(
+                *(
+                    self._load_klines(client, semaphore, str(row["symbol"]), "5m")
+                    for row in self._setup_rows
+                ),
+                return_exceptions=True,
+            )
+            refreshed_setup: list[dict[str, Any]] = []
+            for row, c5 in zip(self._setup_rows, loaded):
+                if isinstance(c5, Exception):
+                    if isinstance(c5, BinanceRateLimitError):
+                        raise c5
+                    decisions.append({
+                        **row,
+                        "decision": "HOLD",
+                        "entry_5m": False,
+                        "hold_reason": "5m data unavailable",
+                    })
+                    refreshed_setup.append(row)
+                    continue
+                combined = {**row, "candles_5m": c5}
+                refreshed_setup.append(combined)
+                try:
+                    decisions.append(self.engine.evaluate_entry_5m(combined))
+                except Exception as exc:
+                    decisions.append({
+                        **combined,
+                        "decision": "HOLD",
+                        "entry_5m": False,
+                        "hold_reason": f"5m evaluation error: {exc}",
+                    })
+            self._setup_rows = refreshed_setup
+
+        self.last_layer = "5m entry"
         return self.engine.build_result(
             universe_symbols=[str(row["symbol"]) for row in self._scan_pool],
             trend_rows=self._trend_rows,
