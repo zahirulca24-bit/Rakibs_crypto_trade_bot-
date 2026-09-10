@@ -309,7 +309,7 @@ export default function MarketWatchPage() {
               <span className="periodTag">{connected ? "WS Live" : "Connecting…"}</span>
             </div>
           </div>
-          <div className="priceChart" style={{ height: 815, minHeight: 815, overflow: "hidden" }}>
+          <div className="priceChart" style={{ height: "auto", minHeight: 0, overflow: "visible", flex: "none" }}>
             <RealCandlestickChart candles={candles} />
           </div>
           <div className="indicatorPanel">
