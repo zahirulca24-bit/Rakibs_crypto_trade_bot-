@@ -26,7 +26,8 @@ type OrderBook = { bids: BookLevel[]; asks: BookLevel[] };
 
 const symbol = "BTCUSDT";
 const wsSymbol = symbol.toLowerCase();
-const streamUrl = `wss://stream.binance.com:9443/stream?streams=${wsSymbol}@ticker/${wsSymbol}@kline_1h/${wsSymbol}@depth20@1000ms`;
+const streamUrl = `wss://data-stream.binance.vision/stream?streams=${wsSymbol}@ticker/${wsSymbol}@kline_1h/${wsSymbol}@depth20@1000ms`;
+const historyUrl = `https://data-api.binance.vision/api/v3/klines?symbol=${symbol}&interval=1h&limit=24`;
 
 function formatNumber(value: string | number | undefined, digits = 2) {
   const number = Number(value);
@@ -51,10 +52,7 @@ export default function MarketWatchPage() {
 
     const loadHistory = async () => {
       try {
-        const response = await fetch(
-          `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1h&limit=24`,
-          { cache: "no-store" },
-        );
+        const response = await fetch(historyUrl, { cache: "no-store" });
         if (!response.ok) throw new Error("Unable to load candle history");
         const rows = await response.json();
         if (!active) return;
@@ -70,11 +68,12 @@ export default function MarketWatchPage() {
           })),
         );
       } catch {
-        if (active) setError("Live stream connected, but candle history is unavailable.");
+        if (active) setError("Candle history is unavailable. Live stream will keep retrying.");
       }
     };
 
     const connect = () => {
+      if (!active) return;
       socket = new WebSocket(streamUrl);
 
       socket.onopen = () => {
@@ -85,55 +84,59 @@ export default function MarketWatchPage() {
 
       socket.onmessage = (event) => {
         if (!active) return;
-        const message = JSON.parse(event.data);
-        const data = message.data;
-        if (!data) return;
+        try {
+          const message = JSON.parse(event.data);
+          const data = message.data;
+          if (!data) return;
 
-        if (data.e === "24hrTicker") {
-          setTicker({
-            symbol: data.s,
-            last_price: data.c,
-            price_change_percent: data.P,
-            high_price: data.h,
-            low_price: data.l,
-            volume: data.v,
-          });
-          return;
-        }
+          if (data.e === "24hrTicker") {
+            setTicker({
+              symbol: data.s,
+              last_price: data.c,
+              price_change_percent: data.P,
+              high_price: data.h,
+              low_price: data.l,
+              volume: data.v,
+            });
+            return;
+          }
 
-        if (data.e === "kline") {
-          const kline = data.k;
-          const nextCandle: Candle = {
-            open_time: Number(kline.t),
-            open: String(kline.o),
-            high: String(kline.h),
-            low: String(kline.l),
-            close: String(kline.c),
-            volume: String(kline.v),
-            close_time: Number(kline.T),
-          };
-          setCandles((current) => {
-            const existingIndex = current.findIndex((item) => item.open_time === nextCandle.open_time);
-            if (existingIndex >= 0) {
-              const next = [...current];
-              next[existingIndex] = nextCandle;
-              return next.slice(-24);
-            }
-            return [...current, nextCandle].slice(-24);
-          });
-          return;
-        }
+          if (data.e === "kline") {
+            const kline = data.k;
+            const nextCandle: Candle = {
+              open_time: Number(kline.t),
+              open: String(kline.o),
+              high: String(kline.h),
+              low: String(kline.l),
+              close: String(kline.c),
+              volume: String(kline.v),
+              close_time: Number(kline.T),
+            };
+            setCandles((current) => {
+              const existingIndex = current.findIndex((item) => item.open_time === nextCandle.open_time);
+              if (existingIndex >= 0) {
+                const next = [...current];
+                next[existingIndex] = nextCandle;
+                return next.slice(-24);
+              }
+              return [...current, nextCandle].slice(-24);
+            });
+            return;
+          }
 
-        if (Array.isArray(data.bids) && Array.isArray(data.asks)) {
-          setOrderBook({
-            bids: data.bids.map(([price, quantity]: [string, string]) => ({ price, quantity })),
-            asks: data.asks.map(([price, quantity]: [string, string]) => ({ price, quantity })),
-          });
+          if (Array.isArray(data.bids) && Array.isArray(data.asks)) {
+            setOrderBook({
+              bids: data.bids.map(([price, quantity]: [string, string]) => ({ price, quantity })),
+              asks: data.asks.map(([price, quantity]: [string, string]) => ({ price, quantity })),
+            });
+          }
+        } catch {
+          setError("Received invalid market stream data. Reconnecting…");
         }
       };
 
       socket.onerror = () => {
-        if (active) setError("Binance WebSocket connection error. Reconnecting…");
+        if (active) setError("Binance market-data WebSocket connection error. Reconnecting…");
       };
 
       socket.onclose = () => {
@@ -167,7 +170,7 @@ export default function MarketWatchPage() {
     <div className="terminalPage">
       <div className="terminalTopbar">
         <div>
-          <p className="eyebrow">Spot Market · Binance WebSocket</p>
+          <p className="eyebrow">Spot Market · Binance Market Data</p>
           <div className="pairTitle">
             <span className="coinBadge">₿</span>
             <h1>BTC/USDT</h1>
