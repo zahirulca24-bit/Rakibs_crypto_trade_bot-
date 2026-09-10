@@ -11,7 +11,7 @@ class BinanceMarketDataError(Exception):
 
 
 class BinanceClient:
-    def __init__(self, base_url: str = "https://api.binance.com", timeout: float = 10.0) -> None:
+    def __init__(self, base_url: str = "https://data-api.binance.vision", timeout: float = 10.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
