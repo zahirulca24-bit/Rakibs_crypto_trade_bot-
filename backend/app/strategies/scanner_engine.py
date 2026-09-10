@@ -10,7 +10,7 @@ MAX_SCANNER_LOGS = 2000
 SCANNER_LOGS: list[dict[str, Any]] = []
 SUPPORTED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 MIN_CLOSED_CANDLES = 200
-MIN_VOLUME_RATIO = 1.5
+DEFAULT_MIN_VOLUME_RATIO = 1.2
 MIN_CANDIDATE_SCORE = 50
 QUOTE_ASSETS = ("FDUSD", "USDT", "USDC")
 STABLE_BASE_ASSETS = {
@@ -18,7 +18,7 @@ STABLE_BASE_ASSETS = {
 }
 
 
-def _score_long(metrics: dict[str, float]) -> tuple[int, list[str]]:
+def _score_long(metrics: dict[str, float], min_volume_ratio: float) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
     if metrics["ema_9"] > metrics["ema_21"]:
@@ -31,12 +31,12 @@ def _score_long(metrics: dict[str, float]) -> tuple[int, list[str]]:
         score += 15; reasons.append("RSI in bullish momentum zone")
     if metrics["macd"] > metrics["macd_signal"]:
         score += 15; reasons.append("MACD above signal")
-    if metrics["volume_ratio"] >= MIN_VOLUME_RATIO:
-        score += 15; reasons.append("Volume expansion >= 1.5x")
+    if metrics["volume_ratio"] >= min_volume_ratio:
+        score += 15; reasons.append(f"Volume expansion >= {min_volume_ratio:.2f}x")
     return score, reasons
 
 
-def _score_short(metrics: dict[str, float]) -> tuple[int, list[str]]:
+def _score_short(metrics: dict[str, float], min_volume_ratio: float) -> tuple[int, list[str]]:
     score = 0
     reasons: list[str] = []
     if metrics["ema_9"] < metrics["ema_21"]:
@@ -49,8 +49,8 @@ def _score_short(metrics: dict[str, float]) -> tuple[int, list[str]]:
         score += 15; reasons.append("RSI in bearish momentum zone")
     if metrics["macd"] < metrics["macd_signal"]:
         score += 15; reasons.append("MACD below signal")
-    if metrics["volume_ratio"] >= MIN_VOLUME_RATIO:
-        score += 15; reasons.append("Volume expansion >= 1.5x")
+    if metrics["volume_ratio"] >= min_volume_ratio:
+        score += 15; reasons.append(f"Volume expansion >= {min_volume_ratio:.2f}x")
     return score, reasons
 
 
@@ -62,7 +62,6 @@ def _base_asset(symbol: str) -> str:
 
 
 def _prepare_markets(markets: list[dict[str, Any]], min_quote_volume: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Backend safety gate. Frontend already sends the top unique liquid universe."""
     best_by_base: dict[str, dict[str, Any]] = {}
     stats: dict[str, Any] = {
         "skipped_liquidity": 0, "skipped_stablecoin": 0, "skipped_duplicate_base": 0, "invalid_markets": 0,
@@ -96,17 +95,24 @@ class ScannerEngine:
     def __init__(self, indicator_engine: IndicatorEngine | None = None) -> None:
         self.indicator_engine = indicator_engine or IndicatorEngine()
 
-    def scan(self, markets: list[dict[str, Any]], timeframe: str = "15m", min_quote_volume: float = 10_000_000) -> dict[str, Any]:
+    def scan(
+        self,
+        markets: list[dict[str, Any]],
+        timeframe: str = "15m",
+        min_quote_volume: float = 10_000_000,
+        min_volume_ratio: float = DEFAULT_MIN_VOLUME_RATIO,
+    ) -> dict[str, Any]:
         if timeframe not in SUPPORTED_TIMEFRAMES:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
         if min_quote_volume < 0:
             raise ValueError("min_quote_volume must be non-negative")
+        if min_volume_ratio <= 0:
+            raise ValueError("min_volume_ratio must be greater than zero")
 
         started = perf_counter()
         timestamp = datetime.now(timezone.utc).isoformat()
         candidates: list[dict[str, Any]] = []
         prepared_markets, prep = _prepare_markets(markets, min_quote_volume)
-
         indicator_passed: list[str] = []
         indicator_dropped: list[str] = []
         volume_passed: list[str] = []
@@ -126,9 +132,8 @@ class ScannerEngine:
 
                 indicator = self.indicator_engine.calculate(symbol, timeframe, candles)
                 indicator_passed.append(symbol)
-                close = float(candles[-1]["close"])
                 metrics = {
-                    "close": close,
+                    "close": float(candles[-1]["close"]),
                     "ema_9": float(indicator["ema_9"]),
                     "ema_21": float(indicator["ema_21"]),
                     "ema_50": float(indicator["ema_50"]),
@@ -139,13 +144,13 @@ class ScannerEngine:
                     "volume_ratio": float(indicator["volume_ratio"]),
                 }
 
-                if metrics["volume_ratio"] < MIN_VOLUME_RATIO:
+                if metrics["volume_ratio"] < min_volume_ratio:
                     volume_dropped.append(symbol)
                     continue
                 volume_passed.append(symbol)
 
-                long_score, long_reasons = _score_long(metrics)
-                short_score, short_reasons = _score_short(metrics)
+                long_score, long_reasons = _score_long(metrics, min_volume_ratio)
+                short_score, short_reasons = _score_short(metrics, min_volume_ratio)
                 long_aligned = 50 <= metrics["rsi_14"] <= 70 and metrics["macd"] > metrics["macd_signal"]
                 short_aligned = 30 <= metrics["rsi_14"] < 50 and metrics["macd"] < metrics["macd_signal"]
                 eligible_long = long_aligned and long_score >= MIN_CANDIDATE_SCORE
@@ -170,22 +175,13 @@ class ScannerEngine:
                     continue
 
                 candidates.append({
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "side": side,
-                    "score": score,
-                    "long_score": long_score,
-                    "short_score": short_score,
-                    "quote_volume": round(quote_volume, 2),
-                    "last_price": round(metrics["close"], 8),
-                    "rsi_14": round(metrics["rsi_14"], 2),
-                    "macd": round(metrics["macd"], 8),
-                    "macd_signal": round(metrics["macd_signal"], 8),
-                    "volume_ratio": round(metrics["volume_ratio"], 2),
-                    "ema_9": round(metrics["ema_9"], 8),
-                    "ema_21": round(metrics["ema_21"], 8),
-                    "ema_50": round(metrics["ema_50"], 8),
-                    "ema_200": round(metrics["ema_200"], 8),
+                    "symbol": symbol, "timeframe": timeframe, "side": side, "score": score,
+                    "long_score": long_score, "short_score": short_score,
+                    "quote_volume": round(quote_volume, 2), "last_price": round(metrics["close"], 8),
+                    "rsi_14": round(metrics["rsi_14"], 2), "macd": round(metrics["macd"], 8),
+                    "macd_signal": round(metrics["macd_signal"], 8), "volume_ratio": round(metrics["volume_ratio"], 2),
+                    "ema_9": round(metrics["ema_9"], 8), "ema_21": round(metrics["ema_21"], 8),
+                    "ema_50": round(metrics["ema_50"], 8), "ema_200": round(metrics["ema_200"], 8),
                     "reasons": reasons,
                 })
             except (KeyError, TypeError, ValueError, ZeroDivisionError):
@@ -197,28 +193,15 @@ class ScannerEngine:
         shortlist_symbols = [item["symbol"] for item in candidates]
         long_candidates = sum(1 for item in candidates if item["side"] == "LONG")
         short_candidates = len(candidates) - long_candidates
-
         result = {
-            "timestamp": timestamp,
-            "engine": "Scanner Engine",
-            "status": "success",
-            "timeframe": timeframe,
-            "min_quote_volume": min_quote_volume,
-            "min_volume_ratio": MIN_VOLUME_RATIO,
-            "min_candidate_score": MIN_CANDIDATE_SCORE,
-            "input_markets": len(markets),
-            "prepared_markets": len(prepared_markets),
-            "evaluated_markets": len(indicator_passed),
-            "candidate_count": len(candidates),
-            "long_candidates": long_candidates,
-            "short_candidates": short_candidates,
-            "skipped_liquidity": prep["skipped_liquidity"],
-            "skipped_stablecoin": prep["skipped_stablecoin"],
-            "skipped_duplicate_base": prep["skipped_duplicate_base"],
-            "skipped_candles": len(indicator_dropped),
-            "skipped_volume": len(volume_dropped),
-            "skipped_direction": len(direction_dropped),
-            "invalid_markets": invalid_markets,
+            "timestamp": timestamp, "engine": "Scanner Engine", "status": "success", "timeframe": timeframe,
+            "min_quote_volume": min_quote_volume, "min_volume_ratio": min_volume_ratio,
+            "min_candidate_score": MIN_CANDIDATE_SCORE, "input_markets": len(markets),
+            "prepared_markets": len(prepared_markets), "evaluated_markets": len(indicator_passed),
+            "candidate_count": len(candidates), "long_candidates": long_candidates, "short_candidates": short_candidates,
+            "skipped_liquidity": prep["skipped_liquidity"], "skipped_stablecoin": prep["skipped_stablecoin"],
+            "skipped_duplicate_base": prep["skipped_duplicate_base"], "skipped_candles": len(indicator_dropped),
+            "skipped_volume": len(volume_dropped), "skipped_direction": len(direction_dropped), "invalid_markets": invalid_markets,
             "pipeline": {
                 "backend_input": {"passed": len(markets), "dropped": 0, "dropped_symbols": [], "passed_symbols": [str(m.get("symbol", "")) for m in markets]},
                 "backend_safety": {"passed": len(prepared_markets), "dropped": len(prep["dropped"]), "dropped_symbols": prep["dropped"], "passed_symbols": [str(m["symbol"]) for m in prepared_markets]},
@@ -227,8 +210,7 @@ class ScannerEngine:
                 "direction": {"passed": len(direction_passed), "dropped": len(direction_dropped), "dropped_symbols": direction_dropped, "passed_symbols": direction_passed},
                 "shortlist": {"passed": len(shortlist_symbols), "dropped": max(0, len(direction_passed) - len(shortlist_symbols)), "dropped_symbols": [], "passed_symbols": shortlist_symbols},
             },
-            "processing_ms": round((perf_counter() - started) * 1000, 2),
-            "candidates": candidates,
+            "processing_ms": round((perf_counter() - started) * 1000, 2), "candidates": candidates,
         }
         SCANNER_LOGS.append(result)
         del SCANNER_LOGS[:-MAX_SCANNER_LOGS]
