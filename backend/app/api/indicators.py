@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.market_data.binance_client import BinanceMarketDataError
 from app.strategies.indicator_engine import IndicatorEngine, get_indicator_logs
@@ -14,8 +15,11 @@ async def run_indicator_engine(
     symbol: str,
     timeframe: str = Query(default="15m"),
     limit: int = Query(default=500, ge=200, le=1000),
+    candles: list[dict[str, Any]] | None = Body(default=None),
 ):
     try:
+        if candles:
+            return engine.calculate(symbol, timeframe=timeframe, candles=candles)
         return await engine.run(symbol, timeframe=timeframe, limit=limit)
     except BinanceMarketDataError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
