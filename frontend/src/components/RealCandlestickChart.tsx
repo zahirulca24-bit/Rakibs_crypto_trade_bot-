@@ -1,13 +1,18 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   CandlestickSeries,
   ColorType,
+  HistogramSeries,
+  LineSeries,
   createChart,
   type CandlestickData,
+  type HistogramData,
   type IChartApi,
   type ISeriesApi,
+  type LineData,
+  type LogicalRange,
   type Time,
 } from "lightweight-charts";
 
@@ -23,95 +28,319 @@ type Props = {
   candles: ChartCandle[];
 };
 
+type NumericPoint = { time: Time; value: number };
+type MacdPoint = NumericPoint & { histogram: number };
+
+const chartBaseOptions = {
+  autoSize: true,
+  layout: {
+    background: { type: ColorType.Solid as const, color: "#0b1118" },
+    textColor: "#8ea0b8",
+    fontSize: 11,
+  },
+  grid: {
+    vertLines: { color: "#151e29" },
+    horzLines: { color: "#151e29" },
+  },
+  rightPriceScale: {
+    borderColor: "#263242",
+    scaleMargins: { top: 0.08, bottom: 0.08 },
+  },
+  timeScale: {
+    borderColor: "#263242",
+    timeVisible: true,
+    secondsVisible: false,
+    rightOffset: 5,
+    barSpacing: 7,
+    minBarSpacing: 2,
+  },
+  crosshair: { mode: 0 },
+  handleScroll: true,
+  handleScale: true,
+};
+
+function ema(values: number[], period: number) {
+  if (!values.length) return [];
+  const multiplier = 2 / (period + 1);
+  const result = [values[0]];
+  for (let i = 1; i < values.length; i += 1) {
+    result.push((values[i] - result[i - 1]) * multiplier + result[i - 1]);
+  }
+  return result;
+}
+
+function rsi(values: number[], period = 14) {
+  const result: Array<number | null> = Array(values.length).fill(null);
+  if (values.length <= period) return result;
+
+  let gains = 0;
+  let losses = 0;
+  for (let i = 1; i <= period; i += 1) {
+    const change = values[i] - values[i - 1];
+    gains += Math.max(change, 0);
+    losses += Math.max(-change, 0);
+  }
+
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+  result[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+
+  for (let i = period + 1; i < values.length; i += 1) {
+    const change = values[i] - values[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(change, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-change, 0)) / period;
+    result[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return result;
+}
+
+function formatValue(value: number | undefined, digits = 2) {
+  if (value === undefined || !Number.isFinite(value)) return "—";
+  return value.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
 export default function RealCandlestickChart({ candles }: Props) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const priceContainerRef = useRef<HTMLDivElement | null>(null);
+  const rsiContainerRef = useRef<HTMLDivElement | null>(null);
+  const macdContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const priceChartRef = useRef<IChartApi | null>(null);
+  const rsiChartRef = useRef<IChartApi | null>(null);
+  const macdChartRef = useRef<IChartApi | null>(null);
+
+  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const emaSeriesRefs = useRef<Record<number, ISeriesApi<"Line"> | null>>({});
+  const rsiSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const macdSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const signalSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const histogramSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+
+  const indicators = useMemo(() => {
+    const closes = candles.map((candle) => Number(candle.close));
+    const times = candles.map((candle) => Math.floor(candle.open_time / 1000) as Time);
+    const periods = [9, 21, 20, 50, 200];
+    const emas = Object.fromEntries(periods.map((period) => [period, ema(closes, period)])) as Record<number, number[]>;
+
+    const rsiValues = rsi(closes, 14);
+    const ema12 = ema(closes, 12);
+    const ema26 = ema(closes, 26);
+    const macd = closes.map((_, index) => ema12[index] - ema26[index]);
+    const signal = ema(macd, 9);
+    const macdPoints: MacdPoint[] = times.map((time, index) => ({
+      time,
+      value: macd[index],
+      histogram: macd[index] - signal[index],
+    }));
+
+    return { times, emas, rsiValues, macd, signal, macdPoints };
+  }, [candles]);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!priceContainerRef.current || !rsiContainerRef.current || !macdContainerRef.current) return;
 
-    const chart = createChart(containerRef.current, {
-      autoSize: true,
-      layout: {
-        background: { type: ColorType.Solid, color: "#0b1118" },
-        textColor: "#8ea0b8",
-      },
-      grid: {
-        vertLines: { color: "#17202b" },
-        horzLines: { color: "#17202b" },
-      },
-      rightPriceScale: {
-        borderColor: "#263242",
-      },
-      timeScale: {
-        borderColor: "#263242",
-        timeVisible: true,
-        secondsVisible: false,
-        rightOffset: 4,
-        barSpacing: 8,
-      },
-      crosshair: {
-        mode: 0,
-      },
-      handleScroll: true,
-      handleScale: true,
+    const priceChart = createChart(priceContainerRef.current, {
+      ...chartBaseOptions,
+      timeScale: { ...chartBaseOptions.timeScale, visible: false },
     });
+    const rsiChart = createChart(rsiContainerRef.current, {
+      ...chartBaseOptions,
+      rightPriceScale: {
+        ...chartBaseOptions.rightPriceScale,
+        autoScale: false,
+        scaleMargins: { top: 0.08, bottom: 0.08 },
+      },
+      timeScale: { ...chartBaseOptions.timeScale, visible: false },
+    });
+    const macdChart = createChart(macdContainerRef.current, chartBaseOptions);
 
-    const series = chart.addSeries(CandlestickSeries, {
+    const candleSeries = priceChart.addSeries(CandlestickSeries, {
       upColor: "#2ed6a1",
       downColor: "#ff5c72",
       borderVisible: false,
       wickUpColor: "#2ed6a1",
       wickDownColor: "#ff5c72",
+      priceLineVisible: true,
+      lastValueVisible: true,
     });
 
-    chartRef.current = chart;
-    seriesRef.current = series;
+    const emaConfig = [
+      [9, "#f6c85f", 2],
+      [21, "#7f9cf5", 2],
+      [20, "#56cfe1", 1],
+      [50, "#c084fc", 2],
+      [200, "#f97316", 2],
+    ] as const;
+
+    for (const [period, color, lineWidth] of emaConfig) {
+      emaSeriesRefs.current[period] = priceChart.addSeries(LineSeries, {
+        color,
+        lineWidth,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+    }
+
+    const rsiSeries = rsiChart.addSeries(LineSeries, {
+      color: "#a78bfa",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+    });
+    rsiSeries.createPriceLine({ price: 70, color: "#5b2b35", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "70" });
+    rsiSeries.createPriceLine({ price: 30, color: "#214a42", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "30" });
+
+    const macdSeries = macdChart.addSeries(LineSeries, {
+      color: "#60a5fa",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const signalSeries = macdChart.addSeries(LineSeries, {
+      color: "#f59e0b",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    const histogramSeries = macdChart.addSeries(HistogramSeries, {
+      priceLineVisible: false,
+      lastValueVisible: false,
+      priceFormat: { type: "price", precision: 4, minMove: 0.0001 },
+    });
+
+    priceChartRef.current = priceChart;
+    rsiChartRef.current = rsiChart;
+    macdChartRef.current = macdChart;
+    candleSeriesRef.current = candleSeries;
+    rsiSeriesRef.current = rsiSeries;
+    macdSeriesRef.current = macdSeries;
+    signalSeriesRef.current = signalSeries;
+    histogramSeriesRef.current = histogramSeries;
+
+    let syncing = false;
+    const syncRange = (source: IChartApi, targets: IChartApi[]) => (range: LogicalRange | null) => {
+      if (!range || syncing) return;
+      syncing = true;
+      for (const target of targets) target.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    };
+
+    const priceSync = syncRange(priceChart, [rsiChart, macdChart]);
+    const rsiSync = syncRange(rsiChart, [priceChart, macdChart]);
+    const macdSync = syncRange(macdChart, [priceChart, rsiChart]);
+    priceChart.timeScale().subscribeVisibleLogicalRangeChange(priceSync);
+    rsiChart.timeScale().subscribeVisibleLogicalRangeChange(rsiSync);
+    macdChart.timeScale().subscribeVisibleLogicalRangeChange(macdSync);
 
     return () => {
-      chart.remove();
-      chartRef.current = null;
-      seriesRef.current = null;
+      priceChart.remove();
+      rsiChart.remove();
+      macdChart.remove();
+      priceChartRef.current = null;
+      rsiChartRef.current = null;
+      macdChartRef.current = null;
+      candleSeriesRef.current = null;
+      emaSeriesRefs.current = {};
+      rsiSeriesRef.current = null;
+      macdSeriesRef.current = null;
+      signalSeriesRef.current = null;
+      histogramSeriesRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    const series = seriesRef.current;
-    const chart = chartRef.current;
-    if (!series || !chart) return;
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries) return;
 
-    const data: CandlestickData<Time>[] = candles.map((candle) => ({
+    const candleData: CandlestickData<Time>[] = candles.map((candle) => ({
       time: Math.floor(candle.open_time / 1000) as Time,
       open: Number(candle.open),
       high: Number(candle.high),
       low: Number(candle.low),
       close: Number(candle.close),
     }));
+    candleSeries.setData(candleData);
 
-    series.setData(data);
-    if (data.length) chart.timeScale().fitContent();
-  }, [candles]);
+    for (const period of [9, 21, 20, 50, 200]) {
+      const series = emaSeriesRefs.current[period];
+      if (!series) continue;
+      const data: LineData<Time>[] = indicators.times.map((time, index) => ({
+        time,
+        value: indicators.emas[period][index],
+      }));
+      series.setData(data);
+    }
+
+    const rsiData: LineData<Time>[] = indicators.times.flatMap((time, index) => {
+      const value = indicators.rsiValues[index];
+      return value === null ? [] : [{ time, value }];
+    });
+    rsiSeriesRef.current?.setData(rsiData);
+
+    const macdData: LineData<Time>[] = indicators.times.map((time, index) => ({ time, value: indicators.macd[index] }));
+    const signalData: LineData<Time>[] = indicators.times.map((time, index) => ({ time, value: indicators.signal[index] }));
+    const histogramData: HistogramData<Time>[] = indicators.macdPoints.map((point) => ({
+      time: point.time,
+      value: point.histogram,
+      color: point.histogram >= 0 ? "rgba(46, 214, 161, 0.55)" : "rgba(255, 92, 114, 0.55)",
+    }));
+    macdSeriesRef.current?.setData(macdData);
+    signalSeriesRef.current?.setData(signalData);
+    histogramSeriesRef.current?.setData(histogramData);
+
+    if (candleData.length) {
+      priceChartRef.current?.timeScale().fitContent();
+      rsiChartRef.current?.timeScale().fitContent();
+      macdChartRef.current?.timeScale().fitContent();
+    }
+  }, [candles, indicators]);
+
+  const lastIndex = candles.length - 1;
+  const latestRsi = lastIndex >= 0 ? indicators.rsiValues[lastIndex] ?? undefined : undefined;
+  const latestMacd = lastIndex >= 0 ? indicators.macd[lastIndex] : undefined;
+  const latestSignal = lastIndex >= 0 ? indicators.signal[lastIndex] : undefined;
 
   return (
-    <div style={{ width: "100%", height: "100%", minHeight: 420, position: "relative" }}>
-      <div ref={containerRef} style={{ width: "100%", height: "100%", minHeight: 420 }} />
-      <a
-        href="https://www.tradingview.com/"
-        target="_blank"
-        rel="noreferrer"
-        style={{
-          position: "absolute",
-          left: 10,
-          bottom: 8,
-          fontSize: 10,
-          color: "#6f8198",
-          textDecoration: "none",
-          zIndex: 2,
-        }}
-      >
-        Charting by TradingView
-      </a>
+    <div style={{ width: "100%", background: "#0b1118" }}>
+      <div style={{ padding: "8px 12px", borderBottom: "1px solid #1c2734", display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11 }}>
+        {[9, 21, 20, 50, 200].map((period) => (
+          <span key={period} style={{ color: "#9cafc3" }}>
+            EMA {period} <strong>{formatValue(indicators.emas[period]?.[lastIndex])}</strong>
+          </span>
+        ))}
+      </div>
+
+      <div ref={priceContainerRef} style={{ width: "100%", height: 430 }} />
+
+      <div style={{ borderTop: "1px solid #1c2734" }}>
+        <div style={{ padding: "6px 12px", fontSize: 11, color: "#9cafc3", display: "flex", gap: 12 }}>
+          <strong style={{ color: "#dfe7f1" }}>RSI (14)</strong>
+          <span>{formatValue(latestRsi)}</span>
+          <span style={{ color: "#6f8198" }}>70 overbought · 30 oversold</span>
+        </div>
+        <div ref={rsiContainerRef} style={{ width: "100%", height: 150 }} />
+      </div>
+
+      <div style={{ borderTop: "1px solid #1c2734", position: "relative" }}>
+        <div style={{ padding: "6px 12px", fontSize: 11, color: "#9cafc3", display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <strong style={{ color: "#dfe7f1" }}>MACD (12, 26, 9)</strong>
+          <span>MACD {formatValue(latestMacd, 4)}</span>
+          <span>Signal {formatValue(latestSignal, 4)}</span>
+          <span>Hist {formatValue(latestMacd !== undefined && latestSignal !== undefined ? latestMacd - latestSignal : undefined, 4)}</span>
+        </div>
+        <div ref={macdContainerRef} style={{ width: "100%", height: 180 }} />
+        <a
+          href="https://www.tradingview.com/"
+          target="_blank"
+          rel="noreferrer"
+          style={{ position: "absolute", left: 10, bottom: 8, fontSize: 10, color: "#6f8198", textDecoration: "none", zIndex: 2 }}
+        >
+          Charting by TradingView
+        </a>
+      </div>
     </div>
   );
 }
