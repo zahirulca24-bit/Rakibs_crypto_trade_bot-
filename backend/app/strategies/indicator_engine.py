@@ -89,7 +89,7 @@ class IndicatorEngine:
     def __init__(self, market_data: MarketDataService | None = None) -> None:
         self.market_data = market_data or MarketDataService()
 
-    def calculate(self, symbol: str, timeframe: str, candles: list[dict[str, Any]]) -> dict[str, Any]:
+    def calculate(self, symbol: str, timeframe: str, candles: list[dict[str, Any]], log_result: bool = True) -> dict[str, Any]:
         started = perf_counter()
         normalized_symbol = self.market_data.normalize_symbol(symbol)
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -136,8 +136,9 @@ class IndicatorEngine:
                 processing_ms=round((perf_counter() - started) * 1000, 2),
             )
             log = asdict(result)
-            INDICATOR_LOGS.append(log)
-            del INDICATOR_LOGS[:-MAX_LOGS]
+            if log_result:
+                INDICATOR_LOGS.append(log)
+                del INDICATOR_LOGS[:-MAX_LOGS]
             return log
         except Exception as exc:
             log = {
@@ -149,8 +150,9 @@ class IndicatorEngine:
                 "error": str(exc),
                 "processing_ms": round((perf_counter() - started) * 1000, 2),
             }
-            INDICATOR_LOGS.append(log)
-            del INDICATOR_LOGS[:-MAX_LOGS]
+            if log_result:
+                INDICATOR_LOGS.append(log)
+                del INDICATOR_LOGS[:-MAX_LOGS]
             raise
 
     async def run(self, symbol: str, timeframe: str = "15m", limit: int = 500) -> dict[str, Any]:
