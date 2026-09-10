@@ -16,6 +16,7 @@ app.include_router(api_router)
 
 @app.on_event("startup")
 async def start_scanner_worker() -> None:
+    await scanner_worker.restore_persisted_state()
     await scanner_worker.start()
 
 
