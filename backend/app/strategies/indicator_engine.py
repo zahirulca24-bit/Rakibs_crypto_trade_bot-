@@ -69,13 +69,11 @@ class IndicatorEngine:
     def __init__(self, market_data: MarketDataService | None = None) -> None:
         self.market_data = market_data or MarketDataService()
 
-    async def run(self, symbol: str, timeframe: str = "15m", limit: int = 500) -> dict[str, Any]:
+    def calculate(self, symbol: str, timeframe: str, candles: list[dict[str, Any]]) -> dict[str, Any]:
         started = perf_counter()
         normalized = self.market_data.normalize_symbol(symbol)
         timestamp = datetime.now(timezone.utc).isoformat()
         try:
-            payload = await self.market_data.klines(normalized, timeframe, max(250, min(limit, 1000)))
-            candles = payload["candles"]
             closes = [float(item["close"]) for item in candles]
             volumes = [float(item["volume"]) for item in candles]
             if len(closes) < 200:
@@ -129,6 +127,11 @@ class IndicatorEngine:
             INDICATOR_LOGS.append(log)
             del INDICATOR_LOGS[:-MAX_LOGS]
             raise
+
+    async def run(self, symbol: str, timeframe: str = "15m", limit: int = 500) -> dict[str, Any]:
+        normalized = self.market_data.normalize_symbol(symbol)
+        payload = await self.market_data.klines(normalized, timeframe, max(250, min(limit, 1000)))
+        return self.calculate(normalized, timeframe, payload["candles"])
 
 
 def get_indicator_logs(start: datetime | None = None, end: datetime | None = None) -> list[dict[str, Any]]:
