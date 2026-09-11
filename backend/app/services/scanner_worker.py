@@ -93,13 +93,11 @@ class FuturesScannerWorker:
             self.last_trend_passed = int((pipeline.get("trend_1h") or {}).get("passed", 0))
             self.last_top30 = int((pipeline.get("top_30") or {}).get("passed", 0))
             self.run_count = 1
-            self.last_layer = "restored 1H Top30"
-            ts = str(result.get("timestamp", ""))
-            try:
-                restored = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                self._last_hour_slot = int(restored.timestamp() * 1000) // ONE_HOUR_MS
-            except Exception:
-                self._last_hour_slot = -1
+            # Restored Top30 is only a warm-start display state.
+            # Never treat its previous 1H slot as a restart cooldown:
+            # after every process restart, schedule one fresh Scanner run immediately.
+            self._last_hour_slot = -1
+            self.last_layer = "restored 1H Top30 · fresh scan pending"
         except Exception as exc:
             self.last_error = f"state restore failed: {exc}"
 
@@ -123,6 +121,7 @@ class FuturesScannerWorker:
         wait = max(0, int(self.blocked_until - time()))
         now_slot = _hour_slot()
         next_hour_seconds = max(0, int(((now_slot + 1) * ONE_HOUR_MS / 1000) - time()))
+        scan_due_now = self._last_hour_slot != now_slot
         return {
             "running": self.running and self.task is not None and not self.task.done(),
             "interval_seconds": LOOP_TICK_SECONDS,
@@ -143,7 +142,7 @@ class FuturesScannerWorker:
             "last_layer": self.last_layer,
             "rate_limited": wait > 0,
             "retry_in_seconds": wait,
-            "next_scan_in_seconds": wait if wait > 0 else next_hour_seconds,
+            "next_scan_in_seconds": wait if wait > 0 else (0 if scan_due_now else next_hour_seconds),
             "run_count": self.run_count,
         }
 
