@@ -5,10 +5,9 @@ from datetime import datetime, timezone
 from time import perf_counter, time
 from typing import Any
 
-import httpx
-
-from app.services.scanner_worker import BinanceRateLimitError, scanner_worker
-from app.strategies.entry_engine import EntryEngine, get_entry_logs
+from app.services.futures_market_data import BinanceRateLimitError, market_data_hub
+from app.services.scanner_worker import scanner_worker
+from app.strategies.entry_engine import EntryEngine
 from app.strategies.strategy_engine import get_strategy_logs
 
 LOOP_TICK_SECONDS = 30
@@ -18,21 +17,6 @@ FIVE_MINUTES_MS = 5 * 60_000
 
 def _slot_5m() -> int:
     return int(time() * 1000) // FIVE_MINUTES_MS
-
-
-def _candles(rows: list[list[Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "open_time": int(item[0]),
-            "open": str(item[1]),
-            "high": str(item[2]),
-            "low": str(item[3]),
-            "close": str(item[4]),
-            "volume": str(item[5]),
-            "close_time": int(item[6]),
-        }
-        for item in rows
-    ]
 
 
 class EntryWorker:
@@ -100,20 +84,6 @@ class EntryWorker:
                 self.last_error = str(exc)
             await asyncio.sleep(LOOP_TICK_SECONDS)
 
-    async def _load_5m(
-        self,
-        client: httpx.AsyncClient,
-        semaphore: asyncio.Semaphore,
-        symbol: str,
-    ) -> list[dict[str, Any]]:
-        async with semaphore:
-            rows = await scanner_worker._request_json(
-                client,
-                "/fapi/v1/klines",
-                params={"symbol": symbol, "interval": "5m", "limit": HISTORY_LIMIT},
-            )
-            return _candles(rows)
-
     async def _run(self) -> dict[str, Any] | None:
         async with self._run_lock:
             strategy_logs = get_strategy_logs()
@@ -129,25 +99,30 @@ class EntryWorker:
                 if row.get("status") == "PASS"
             ]
 
+            pass_symbols = [
+                str(row["symbol"])
+                for row in pass_rows
+                if row.get("symbol")
+            ]
+            await market_data_hub.set_stream_symbols("5m", pass_symbols)
+
             started = perf_counter()
             self.last_started_at = datetime.now(timezone.utc).isoformat()
 
             try:
                 rows: list[dict[str, Any]] = []
                 if pass_rows:
-                    timeout = httpx.Timeout(30.0, connect=10.0)
-                    semaphore = asyncio.Semaphore(3)
-                    async with httpx.AsyncClient(
-                        timeout=timeout,
-                        headers={"User-Agent": "RakibTrade/1.0"},
-                    ) as client:
-                        candle_results = await asyncio.gather(
-                            *(
-                                self._load_5m(client, semaphore, str(row["symbol"]))
-                                for row in pass_rows
-                            ),
-                            return_exceptions=True,
-                        )
+                    candle_results = await asyncio.gather(
+                        *(
+                            market_data_hub.get_klines(
+                                str(row["symbol"]),
+                                "5m",
+                                HISTORY_LIMIT,
+                            )
+                            for row in pass_rows
+                        ),
+                        return_exceptions=True,
+                    )
 
                     for strategy_row, candles in zip(pass_rows, candle_results):
                         if isinstance(candles, Exception):
