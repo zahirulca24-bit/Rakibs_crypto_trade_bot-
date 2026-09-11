@@ -64,10 +64,10 @@ class FuturesScannerWorker:
         self.last_top30 = 0
         self.run_count = 0
 
-        # Protect Render/shared IP after deploy: do not immediately re-hit Binance if a prior instance was banned.
-        self.blocked_until = time() + 60 * 60
+        # No artificial startup cooldown. Real Binance 418/429 responses set blocked_until dynamically.
+        self.blocked_until = 0.0
         self.backoff_seconds = DEFAULT_BACKOFF_SECONDS
-        self.last_layer = "startup cooldown"
+        self.last_layer = "startup ready"
 
         self._cache: dict[str, tuple[float, Any]] = {}
         self._scan_pool: list[dict[str, Any]] = []
