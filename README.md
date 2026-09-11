@@ -1,5 +1,29 @@
 # Rakibs_crypto_trade_bot-
 
+## Approved Plan Record
+
+- **Date:** 11 September 2026
+- **Day:** Friday
+- **Time:** 01:12 PM
+- **Timezone:** Asia/Dhaka
+
+## Scanner Approved Plan
+
+| # | Stage / Rule | Approved Plan |
+| --- | --- | --- |
+| 1 | **1H Scanner** | Binance USD-M Futures থেকে সর্বোচ্চ **200 symbols** scan করবে |
+| 2 | **1H Logic** | Existing 1H filter/scoring logic থাকবে |
+| 3 | **1H Output** | 1H filter + ranking শেষে **Top 30 symbols** থাকবে |
+| 4 | **Auto Scan** | **প্রতি 1 ঘণ্টায় Auto Scan হবে** |
+| 5 | **Manual Scan** | **Manual Scan থাকবে** |
+| 6 | **15m Setup** | 1H Top 30 symbols existing **15m Strategy/Setup Engine**-এ যাবে |
+| 7 | **15m Logic** | Existing 15m setup logic use করা হবে |
+| 8 | **15m Output** | 15m PASS symbols **5m Entry** stage-এ যাবে |
+| 9 | **5m Entry** | নতুন **5m Entry stage** implement হবে |
+| 10 | **Final Scanner Flow** | **1H Scanner → Top 30 → 15m Setup → 5m Entry** |
+| 11 | **Scanner End** | Scanner flow **5m Entry result**-এ শেষ হবে |
+| 12 | **Replacement Rule** | Existing code-এর যে অংশ approved architecture-এর সাথে conflict করবে, শুধু সেই অংশ replace/refactor হবে; existing approved 1H/15m logic অযথা rewrite করা হবে না |
+
 ## Current Architecture
 
 ```text
