@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from app.services.hybrid_market_data import hybrid_market_data
 from app.services.scanner_worker import scanner_worker
 from app.strategies.scanner_engine import get_scanner_logs
 
@@ -23,3 +24,8 @@ def scanner_logs():
 @router.get("/worker/status")
 def scanner_worker_status():
     return scanner_worker.status()
+
+
+@router.get("/market-data/status")
+def market_data_status():
+    return hybrid_market_data.status()
