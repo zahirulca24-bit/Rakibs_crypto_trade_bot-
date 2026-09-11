@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from time import perf_counter, time
 from typing import Any
 
-import httpx
-
-from app.strategies.scanner_engine import MIN_QUOTE_VOLUME, SCAN_POOL_LIMIT, TOP_LIMIT, ScannerEngine, restore_scanner_result
+from app.services.futures_market_data import BinanceRateLimitError, market_data_hub
 from app.services.state_store import ensure_state_schema, load_scanner_result, save_scanner_result
+from app.strategies.scanner_engine import (
+    MIN_QUOTE_VOLUME,
+    SCAN_POOL_LIMIT,
+    TOP_LIMIT,
+    ScannerEngine,
+    restore_scanner_result,
+)
 
-FUTURES_API = "https://fapi.binance.com"
 LOOP_TICK_SECONDS = 30
 HISTORY_LIMIT = 250
 ALLOWED_QUOTES = {"USDT", "USDC"}
@@ -20,31 +23,14 @@ STABLE_BASES = {"USDT", "USDC", "FDUSD", "TUSD", "USDP", "DAI", "USD1", "USDE", 
 EXCHANGE_CACHE_SECONDS = 6 * 60 * 60
 TICKER_CACHE_SECONDS = 5 * 60
 BOOK_CACHE_SECONDS = 60
-DEFAULT_BACKOFF_SECONDS = 5 * 60
-MAX_BACKOFF_SECONDS = 60 * 60
 ONE_HOUR_MS = 60 * 60_000
-
-
-def _candles(rows: list[list[Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "open_time": int(item[0]),
-            "open": str(item[1]),
-            "high": str(item[2]),
-            "low": str(item[3]),
-            "close": str(item[4]),
-            "volume": str(item[5]),
-            "close_time": int(item[6]),
-        }
-        for item in rows
-    ]
 
 
 def _hour_slot() -> int:
     return int(time() * 1000) // ONE_HOUR_MS
 
 
-class BinanceRateLimitError(RuntimeError):
+class ScannerBusyError(RuntimeError):
     pass
 
 
@@ -64,17 +50,13 @@ class FuturesScannerWorker:
         self.last_top30 = 0
         self.run_count = 0
 
-        # No artificial startup cooldown. Real Binance 418/429 responses set blocked_until dynamically.
-        self.blocked_until = 0.0
-        self.backoff_seconds = DEFAULT_BACKOFF_SECONDS
         self.last_layer = "startup ready"
-
-        self._cache: dict[str, tuple[float, Any]] = {}
         self._scan_pool: list[dict[str, Any]] = []
         self._trend_rows: list[dict[str, Any]] = []
         self._participation_rows: list[dict[str, Any]] = []
         self._top_rows: list[dict[str, Any]] = []
         self._last_hour_slot = -1
+        self._run_lock = asyncio.Lock()
 
     async def restore_persisted_state(self) -> None:
         try:
@@ -93,11 +75,17 @@ class FuturesScannerWorker:
             self.last_trend_passed = int((pipeline.get("trend_1h") or {}).get("passed", 0))
             self.last_top30 = int((pipeline.get("top_30") or {}).get("passed", 0))
             self.run_count = 1
-            # Restored Top30 is only a warm-start display state.
-            # Never treat its previous 1H slot as a restart cooldown:
-            # after every process restart, schedule one fresh Scanner run immediately.
+
+            # Warm-start display state only. A restart still schedules one fresh 1H scan.
             self._last_hour_slot = -1
             self.last_layer = "restored 1H Top30 · fresh scan pending"
+
+            restored_symbols = [
+                str(row.get("symbol"))
+                for row in list(result.get("candidates") or [])
+                if row.get("symbol")
+            ]
+            await market_data_hub.set_stream_symbols("15m", restored_symbols)
         except Exception as exc:
             self.last_error = f"state restore failed: {exc}"
 
@@ -118,14 +106,16 @@ class FuturesScannerWorker:
             self.task = None
 
     def status(self) -> dict[str, Any]:
-        wait = max(0, int(self.blocked_until - time()))
+        market_status = market_data_hub.status()
+        wait = int(market_status.get("retry_in_seconds", 0) or 0)
         now_slot = _hour_slot()
         next_hour_seconds = max(0, int(((now_slot + 1) * ONE_HOUR_MS / 1000) - time()))
         scan_due_now = self._last_hour_slot != now_slot
         return {
             "running": self.running and self.task is not None and not self.task.done(),
+            "scan_in_progress": self._run_lock.locked(),
             "interval_seconds": LOOP_TICK_SECONDS,
-            "architecture": "1H Scanner only -> Top 30",
+            "architecture": "1H Scanner -> Top 30 -> 15m -> 5m",
             "schedule": {"scanner": "first successful run, then next new 1H candle"},
             "scan_pool_limit": SCAN_POOL_LIMIT,
             "top_limit": TOP_LIMIT,
@@ -140,10 +130,19 @@ class FuturesScannerWorker:
             "last_trend_passed": self.last_trend_passed,
             "last_top30": self.last_top30,
             "last_layer": self.last_layer,
-            "rate_limited": wait > 0,
+            "rate_limited": bool(market_status.get("rate_limited")),
             "retry_in_seconds": wait,
             "next_scan_in_seconds": wait if wait > 0 else (0 if scan_due_now else next_hour_seconds),
             "run_count": self.run_count,
+            "data_mode": market_status.get("mode"),
+            "websocket_connected": market_status.get("websocket_connected"),
+            "websocket_streams": market_status.get("websocket_streams"),
+            "websocket_last_error": market_status.get("websocket_last_error"),
+            "rest_used_weight_1m": market_status.get("rest_used_weight_1m"),
+            "rest_request_count": market_status.get("rest_request_count"),
+            "history_cache_hits": market_status.get("history_cache_hits"),
+            "cached_series": market_status.get("cached_series"),
+            "last_rate_limit_status": market_status.get("last_rate_limit_status"),
         }
 
     async def _loop(self) -> None:
@@ -155,81 +154,6 @@ class FuturesScannerWorker:
             except Exception as exc:
                 self.last_error = str(exc)
             await asyncio.sleep(LOOP_TICK_SECONDS)
-
-    def _retry_after_seconds(self, response: httpx.Response) -> int:
-        raw = response.headers.get("Retry-After")
-        if not raw:
-            return self.backoff_seconds
-        try:
-            return max(1, int(float(raw)))
-        except ValueError:
-            try:
-                dt = parsedate_to_datetime(raw)
-                return max(1, int(dt.timestamp() - time()))
-            except Exception:
-                return self.backoff_seconds
-
-    async def _request_json(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None) -> Any:
-        if time() < self.blocked_until:
-            raise BinanceRateLimitError(f"Binance cooldown active; retry in {int(self.blocked_until - time())}s")
-        response = await client.get(FUTURES_API + path, params=params)
-        if response.status_code in {418, 429}:
-            retry = self._retry_after_seconds(response)
-            if response.status_code == 418:
-                retry = max(retry, self.backoff_seconds)
-            retry = min(retry, MAX_BACKOFF_SECONDS)
-            self.blocked_until = time() + retry
-            self.backoff_seconds = min(max(retry * 2, DEFAULT_BACKOFF_SECONDS), MAX_BACKOFF_SECONDS)
-            raise BinanceRateLimitError(f"Binance HTTP {response.status_code}; cooldown {retry}s")
-        response.raise_for_status()
-        self.backoff_seconds = DEFAULT_BACKOFF_SECONDS
-        return response.json()
-
-    async def _cached_json(self, client: httpx.AsyncClient, key: str, ttl: int, path: str) -> Any:
-        cached = self._cache.get(key)
-        now = time()
-        if cached and now - cached[0] < ttl:
-            return cached[1]
-        data = await self._request_json(client, path)
-        self._cache[key] = (now, data)
-        return data
-
-    async def _load_klines(
-        self,
-        client: httpx.AsyncClient,
-        semaphore: asyncio.Semaphore,
-        symbol: str,
-    ) -> list[dict[str, Any]]:
-        async with semaphore:
-            rows = await self._request_json(
-                client,
-                "/fapi/v1/klines",
-                params={"symbol": symbol, "interval": "1h", "limit": HISTORY_LIMIT},
-            )
-            return _candles(rows)
-
-    async def _load_oi_change(
-        self,
-        client: httpx.AsyncClient,
-        semaphore: asyncio.Semaphore,
-        symbol: str,
-    ) -> float:
-        async with semaphore:
-            try:
-                rows = await self._request_json(
-                    client,
-                    "/futures/data/openInterestHist",
-                    params={"symbol": symbol, "period": "1h", "limit": 2},
-                )
-                if len(rows) < 2:
-                    return 0.0
-                old = float(rows[-2].get("sumOpenInterest", 0) or 0)
-                new = float(rows[-1].get("sumOpenInterest", 0) or 0)
-                return ((new - old) / old * 100) if old else 0.0
-            except BinanceRateLimitError:
-                raise
-            except Exception:
-                return 0.0
 
     def _build_scan_pool(self, exchange: Any, ticker_map: dict[str, float]) -> list[dict[str, Any]]:
         best_by_base: dict[str, dict[str, Any]] = {}
@@ -258,66 +182,90 @@ class FuturesScannerWorker:
             reverse=True,
         )[:SCAN_POOL_LIMIT]
 
-    async def _run_1h_scan(self) -> dict[str, Any]:
+    async def _execute_1h_scan(self) -> dict[str, Any]:
         started = perf_counter()
         self.last_started_at = datetime.now(timezone.utc).isoformat()
-        timeout = httpx.Timeout(30.0, connect=10.0)
 
         try:
-            async with httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "RakibTrade/1.0"}) as client:
-                exchange = await self._cached_json(
-                    client, "exchangeInfo", EXCHANGE_CACHE_SECONDS, "/fapi/v1/exchangeInfo"
-                )
-                tickers = await self._cached_json(
-                    client, "ticker24h", TICKER_CACHE_SECONDS, "/fapi/v1/ticker/24hr"
-                )
-                book = await self._cached_json(
-                    client, "bookTicker", BOOK_CACHE_SECONDS, "/fapi/v1/ticker/bookTicker"
-                )
+            exchange = await market_data_hub.cached_json(
+                "exchangeInfo",
+                EXCHANGE_CACHE_SECONDS,
+                "/fapi/v1/exchangeInfo",
+            )
+            tickers = await market_data_hub.cached_json(
+                "ticker24h",
+                TICKER_CACHE_SECONDS,
+                "/fapi/v1/ticker/24hr",
+            )
+            book = await market_data_hub.cached_json(
+                "bookTicker",
+                BOOK_CACHE_SECONDS,
+                "/fapi/v1/ticker/bookTicker",
+            )
 
-                ticker_map = {
-                    str(item.get("symbol", "")): float(item.get("quoteVolume", 0) or 0)
-                    for item in tickers
-                }
-                book_map = {str(item.get("symbol", "")): item for item in book}
+            ticker_map = {
+                str(item.get("symbol", "")): float(item.get("quoteVolume", 0) or 0)
+                for item in tickers
+            }
+            book_map = {str(item.get("symbol", "")): item for item in book}
 
-                self._scan_pool = self._build_scan_pool(exchange, ticker_map)
-                if not self._scan_pool:
-                    raise RuntimeError("No eligible liquid USD-M perpetual contracts found")
+            self._scan_pool = self._build_scan_pool(exchange, ticker_map)
+            if not self._scan_pool:
+                raise RuntimeError("No eligible liquid USD-M perpetual contracts found")
 
-                semaphore = asyncio.Semaphore(4)
-                candle_results = await asyncio.gather(
-                    *(self._load_klines(client, semaphore, str(row["symbol"])) for row in self._scan_pool),
-                    return_exceptions=True,
-                )
+            candle_results = await asyncio.gather(
+                *(
+                    market_data_hub.get_klines(
+                        str(row["symbol"]),
+                        "1h",
+                        HISTORY_LIMIT,
+                    )
+                    for row in self._scan_pool
+                ),
+                return_exceptions=True,
+            )
 
-                trend_rows: list[dict[str, Any]] = []
-                for row, candles in zip(self._scan_pool, candle_results):
-                    if isinstance(candles, Exception):
-                        if isinstance(candles, BinanceRateLimitError):
-                            raise candles
-                        continue
-                    try:
-                        analyzed = self.engine.analyze_trend({**row, "candles_1h": candles})
-                        if analyzed:
-                            trend_rows.append(analyzed)
-                    except Exception:
-                        continue
-                self._trend_rows = trend_rows
+            trend_rows: list[dict[str, Any]] = []
+            for row, candles in zip(self._scan_pool, candle_results):
+                if isinstance(candles, Exception):
+                    if isinstance(candles, BinanceRateLimitError):
+                        raise candles
+                    continue
+                try:
+                    analyzed = self.engine.analyze_trend({**row, "candles_1h": candles})
+                    if analyzed:
+                        trend_rows.append(analyzed)
+                except Exception:
+                    continue
+            self._trend_rows = trend_rows
 
-                async def enrich(row: dict[str, Any]) -> dict[str, Any]:
-                    symbol = str(row["symbol"])
-                    oi_change = await self._load_oi_change(client, semaphore, symbol)
-                    book_row = book_map.get(symbol) or {}
-                    bid = float(book_row.get("bidPrice", 0) or 0)
-                    ask = float(book_row.get("askPrice", 0) or 0)
-                    mid = (bid + ask) / 2 if bid and ask else 0.0
-                    spread_pct = ((ask - bid) / mid * 100) if mid else 999.0
-                    return {**row, "oi_change_1h_pct": oi_change, "spread_pct": spread_pct}
+            async def enrich(row: dict[str, Any]) -> dict[str, Any]:
+                symbol = str(row["symbol"])
+                oi_change = await market_data_hub.get_oi_change(symbol)
+                book_row = book_map.get(symbol) or {}
+                bid = float(book_row.get("bidPrice", 0) or 0)
+                ask = float(book_row.get("askPrice", 0) or 0)
+                mid = (bid + ask) / 2 if bid and ask else 0.0
+                spread_pct = ((ask - bid) / mid * 100) if mid else 999.0
+                return {**row, "oi_change_1h_pct": oi_change, "spread_pct": spread_pct}
 
-                enriched = await asyncio.gather(*(enrich(row) for row in trend_rows))
-                self._participation_rows = self.engine.rank_participation(enriched)
-                self._top_rows = self._participation_rows[:TOP_LIMIT]
+            enriched = await asyncio.gather(
+                *(enrich(row) for row in trend_rows),
+                return_exceptions=True,
+            )
+            participation_input: list[dict[str, Any]] = []
+            for item in enriched:
+                if isinstance(item, Exception):
+                    if isinstance(item, BinanceRateLimitError):
+                        raise item
+                    continue
+                participation_input.append(item)
+
+            self._participation_rows = self.engine.rank_participation(participation_input)
+            self._top_rows = self._participation_rows[:TOP_LIMIT]
+
+            top_symbols = [str(row["symbol"]) for row in self._top_rows]
+            await market_data_hub.set_stream_symbols("15m", top_symbols)
 
             result = self.engine.build_result(
                 universe_symbols=[str(row["symbol"]) for row in self._scan_pool],
@@ -348,9 +296,18 @@ class FuturesScannerWorker:
         finally:
             self.last_finished_at = datetime.now(timezone.utc).isoformat()
 
+    async def _run_1h_scan(self) -> dict[str, Any]:
+        async with self._run_lock:
+            return await self._execute_1h_scan()
+
     async def run_scheduled(self) -> dict[str, Any] | None:
-        if time() < self.blocked_until:
+        market_status = market_data_hub.status()
+        if market_status.get("rate_limited"):
             self.last_layer = "Binance cooldown"
+            return None
+
+        if self._run_lock.locked():
+            self.last_layer = "1H scan already running"
             return None
 
         current_slot = _hour_slot()
@@ -362,10 +319,14 @@ class FuturesScannerWorker:
         return await self._run_1h_scan()
 
     async def run_once(self) -> dict[str, Any]:
-        if time() < self.blocked_until:
+        market_status = market_data_hub.status()
+        if market_status.get("rate_limited"):
             raise BinanceRateLimitError(
-                f"Binance cooldown active; retry in {int(self.blocked_until - time())}s"
+                int(market_status.get("last_rate_limit_status") or 429),
+                int(market_status.get("retry_in_seconds", 1) or 1),
             )
+        if self._run_lock.locked():
+            raise ScannerBusyError("Scanner run already in progress")
         return await self._run_1h_scan()
 
 
