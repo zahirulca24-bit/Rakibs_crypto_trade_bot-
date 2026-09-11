@@ -5,9 +5,8 @@ from datetime import datetime, timezone
 from time import perf_counter, time
 from typing import Any
 
-import httpx
-
-from app.services.scanner_worker import BinanceRateLimitError, FUTURES_API, scanner_worker
+from app.services.futures_market_data import BinanceRateLimitError, market_data_hub
+from app.services.scanner_worker import scanner_worker
 from app.strategies.scanner_engine import get_scanner_logs
 from app.strategies.strategy_engine import StrategyEngine, get_strategy_logs
 
@@ -18,21 +17,6 @@ FIFTEEN_MINUTES_MS = 15 * 60_000
 
 def _slot_15m() -> int:
     return int(time() * 1000) // FIFTEEN_MINUTES_MS
-
-
-def _candles(rows: list[list[Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "open_time": int(item[0]),
-            "open": str(item[1]),
-            "high": str(item[2]),
-            "low": str(item[3]),
-            "close": str(item[4]),
-            "volume": str(item[5]),
-            "close_time": int(item[6]),
-        }
-        for item in rows
-    ]
 
 
 class StrategyWorker:
@@ -100,20 +84,6 @@ class StrategyWorker:
                 self.last_error = str(exc)
             await asyncio.sleep(LOOP_TICK_SECONDS)
 
-    async def _load_15m(
-        self,
-        client: httpx.AsyncClient,
-        semaphore: asyncio.Semaphore,
-        symbol: str,
-    ) -> list[dict[str, Any]]:
-        async with semaphore:
-            rows = await scanner_worker._request_json(
-                client,
-                "/fapi/v1/klines",
-                params={"symbol": symbol, "interval": "15m", "limit": HISTORY_LIMIT},
-            )
-            return _candles(rows)
-
     async def _run(self) -> dict[str, Any] | None:
         async with self._run_lock:
             scanner_logs = get_scanner_logs()
@@ -125,20 +95,28 @@ class StrategyWorker:
             candidates = list(scanner_result.get("candidates") or [])
             scanner_timestamp = str(scanner_result.get("timestamp", ""))
             if not candidates:
+                await market_data_hub.set_stream_symbols("15m", [])
                 self.last_layer = "Scanner Top30 empty"
                 return None
 
+            symbols = [str(row["symbol"]) for row in candidates]
+            await market_data_hub.set_stream_symbols("15m", symbols)
+
             started = perf_counter()
             self.last_started_at = datetime.now(timezone.utc).isoformat()
-            timeout = httpx.Timeout(30.0, connect=10.0)
 
             try:
-                semaphore = asyncio.Semaphore(3)
-                async with httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "RakibTrade/1.0"}) as client:
-                    candle_results = await asyncio.gather(
-                        *(self._load_15m(client, semaphore, str(row["symbol"])) for row in candidates),
-                        return_exceptions=True,
-                    )
+                candle_results = await asyncio.gather(
+                    *(
+                        market_data_hub.get_klines(
+                            str(row["symbol"]),
+                            "15m",
+                            HISTORY_LIMIT,
+                        )
+                        for row in candidates
+                    ),
+                    return_exceptions=True,
+                )
 
                 rows: list[dict[str, Any]] = []
                 for scanner_row, candles in zip(candidates, candle_results):
@@ -183,6 +161,13 @@ class StrategyWorker:
                 self._last_scanner_timestamp = scanner_timestamp
                 self.last_error = None
                 self.last_layer = "15m Strategy complete"
+
+                pass_symbols = [
+                    str(row["symbol"])
+                    for row in rows
+                    if row.get("status") == "PASS" and row.get("symbol")
+                ]
+                await market_data_hub.set_stream_symbols("5m", pass_symbols)
                 return result
             except Exception as exc:
                 self.last_error = str(exc)
@@ -215,7 +200,8 @@ class StrategyWorker:
         scanner_status = scanner_worker.status()
         if scanner_status.get("rate_limited"):
             raise BinanceRateLimitError(
-                f"Binance cooldown active; retry in {int(scanner_status.get('retry_in_seconds', 0) or 0)}s"
+                int(scanner_status.get("last_rate_limit_status") or 429),
+                int(scanner_status.get("retry_in_seconds", 1) or 1),
             )
         result = await self._run()
         if result is not None:
