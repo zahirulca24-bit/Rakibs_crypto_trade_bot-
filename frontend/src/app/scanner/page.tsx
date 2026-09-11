@@ -7,7 +7,7 @@ type Pipeline={scan_pool?:StageDiag;trend_1h?:StageDiag;participation?:StageDiag
 type Candidate={symbol:string;side:"LONG"|"SHORT";score:number;quote_volume:number;last_price:number;structure_1h?:string;ema20_1h?:number;ema50_1h?:number;ema200_1h?:number;rsi_1h?:number;rvol_1h?:number;atr_pct_1h?:number;oi_change_1h_pct?:number;spread_pct?:number;reasons:string[]};
 type ScannerRun={timestamp:string;engine:string;version?:string;status:string;candidate_count:number;long_candidates:number;short_candidates:number;pipeline?:Pipeline;processing_ms:number;candidates:Candidate[]};
 type ScannerLogsResponse={engine:string;logs:ScannerRun[]};
-type ScannerWorkerStatus={running:boolean;last_error?:string|null;last_layer?:string;rate_limited?:boolean;retry_in_seconds?:number;next_scan_in_seconds?:number;run_count:number;last_scan_pool:number;last_top30:number};
+type ScannerWorkerStatus={running:boolean;scan_in_progress?:boolean;last_error?:string|null;last_layer?:string;rate_limited?:boolean;retry_in_seconds?:number;next_scan_in_seconds?:number;run_count:number;last_scan_pool:number;last_top30:number;data_mode?:string;websocket_connected?:boolean;websocket_streams?:number;websocket_last_error?:string|null;rest_used_weight_1m?:number;rest_request_count?:number;history_cache_hits?:number;cached_series?:number;last_rate_limit_status?:number|null};
 
 type StrategyRow={symbol:string;side:"LONG"|"SHORT";status:"PASS"|"HOLD";score:number;scanner_score?:number;rsi_15m?:number;macd_histogram_15m?:number;rvol_15m?:number;atr_pct_15m?:number;reasons?:string[];hold_reasons?:string[]};
 type StrategyRun={timestamp:string;input_count:number;pass_count:number;hold_count:number;long_pass:number;short_pass:number;processing_ms:number;rows:StrategyRow[]};
@@ -98,7 +98,7 @@ export default function ScannerPage(){
  },[]);
 
  const runNow=useCallback(async()=>{
-  if(scanning||worker?.rate_limited)return;
+  if(scanning||worker?.rate_limited||worker?.scan_in_progress)return;
   setScanning(true);
   setError(null);
   try{
@@ -113,7 +113,7 @@ export default function ScannerPage(){
   }finally{
    setScanning(false);
   }
- },[scanning,worker?.rate_limited,load]);
+ },[scanning,worker?.rate_limited,worker?.scan_in_progress,load]);
 
  const strategyDiag=useMemo(()=>diagFromRows(latestStrategy?.rows??[],"PASS"),[latestStrategy]);
  const entryDiag=useMemo(()=>diagFromRows(latestEntry?.rows??[],"ENTRY"),[latestEntry]);
@@ -142,8 +142,9 @@ export default function ScannerPage(){
     <span className="modePill"><span />{worker?.running?"Auto 1H active":"Auto 1H inactive"}</span>
     <span className="periodTag">{strategyWorker?.running?"15m active":"15m inactive"}</span>
     <span className="periodTag">{entryWorker?.running?"5m active":"5m inactive"}</span>
-    <button onClick={()=>void runNow()} disabled={scanning||worker?.rate_limited} style={manualRunStyle}>
-     {worker?.rate_limited?"Manual Scan · Cooldown":scanning?"Manual Scan · Running…":"Manual Scan"}
+    <span className="periodTag">{worker?.websocket_connected?`WS live · ${worker.websocket_streams??0} streams`:"WS warming"}</span>
+    <button onClick={()=>void runNow()} disabled={scanning||worker?.rate_limited||worker?.scan_in_progress} style={manualRunStyle}>
+     {worker?.rate_limited?"Manual Scan · Cooldown":worker?.scan_in_progress?"Manual Scan · Busy":scanning?"Manual Scan · Running…":"Manual Scan"}
     </button>
    </div>
   </div>
@@ -166,9 +167,11 @@ export default function ScannerPage(){
      <span className="periodTag">1H Runs {worker?.run_count??0}</span>
      <span className="periodTag">15m Runs {strategyWorker?.run_count??0}</span>
      <span className="periodTag">5m Runs {entryWorker?.run_count??0}</span>
+     <span className="periodTag">REST weight {worker?.rest_used_weight_1m??0}</span>
+     <span className="periodTag">Cache hits {worker?.history_cache_hits??0}</span>
      {worker?.rate_limited?<span className="periodTag">Retry in {duration(cooldown)}</span>:<span className="periodTag">Next 1H scan {duration(nextScan)}</span>}
-     <button onClick={()=>void runNow()} disabled={scanning||worker?.rate_limited} style={manualRunStyle}>
-      {worker?.rate_limited?"Cooldown":scanning?"Scanning…":"Run 1H Now"}
+     <button onClick={()=>void runNow()} disabled={scanning||worker?.rate_limited||worker?.scan_in_progress} style={manualRunStyle}>
+      {worker?.rate_limited?"Cooldown":worker?.scan_in_progress?"Scanner Busy":scanning?"Scanning…":"Run 1H Now"}
      </button>
      <button onClick={()=>void load()} style={controlStyle}>Refresh</button>
     </div>
@@ -201,7 +204,8 @@ export default function ScannerPage(){
     </div>
    </div>
 
-   {worker?.rate_limited?<p className="muted" style={{marginBottom:0}}>Binance cooldown active · Scanner will retry automatically in {duration(cooldown)}.</p>:worker?.last_error&&<p className="negative" style={{marginBottom:0}}>1H Worker: {worker.last_error}</p>}
+   {worker?.rate_limited?<p className="muted" style={{marginBottom:0}}>Binance HTTP {worker.last_rate_limit_status??429} cooldown · Scanner will retry automatically in {duration(cooldown)}.</p>:worker?.last_error&&<p className="negative" style={{marginBottom:0}}>1H Worker: {worker.last_error}</p>}
+   {worker?.websocket_last_error&&<p className="muted" style={{marginBottom:0}}>WebSocket reconnecting: {worker.websocket_last_error}</p>}
    {strategyWorker?.last_error&&<p className="negative" style={{marginBottom:0}}>15m Worker: {strategyWorker.last_error}</p>}
    {entryWorker?.last_error&&<p className="negative" style={{marginBottom:0}}>5m Worker: {entryWorker.last_error}</p>}
    {error&&<p className="negative" style={{marginBottom:0}}>{error}</p>}
