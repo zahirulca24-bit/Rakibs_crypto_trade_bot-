@@ -1,101 +1,62 @@
-# Rakibs_crypto_trade_bot-
-
-## Approved Plan Record
-
-- **Date:** 11 September 2026
-- **Day:** Friday
-- **Time:** 01:12 PM
-- **Timezone:** Asia/Dhaka
-
-## Scanner Approved Plan
-
-| # | Stage / Rule | Approved Plan |
-| --- | --- | --- |
-| 1 | **1H Scanner** | Binance USD-M Futures থেকে সর্বোচ্চ **200 symbols** scan করবে |
-| 2 | **1H Logic** | Existing 1H filter/scoring logic থাকবে |
-| 3 | **1H Output** | 1H filter + ranking শেষে **Top 30 symbols** থাকবে |
-| 4 | **Auto Scan** | **প্রতি 1 ঘণ্টায় Auto Scan হবে** |
-| 5 | **Manual Scan** | **Manual Scan থাকবে** |
-| 6 | **15m Setup** | 1H Top 30 symbols existing **15m Strategy/Setup Engine**-এ যাবে |
-| 7 | **15m Logic** | Existing 15m setup logic use করা হবে |
-| 8 | **15m Output** | 15m PASS symbols **5m Entry** stage-এ যাবে |
-| 9 | **5m Entry** | নতুন **5m Entry stage** implement হবে |
-| 10 | **Final Scanner Flow** | **1H Scanner → Top 30 → 15m Setup → 5m Entry** |
-| 11 | **Scanner End** | Scanner flow **5m Entry result**-এ শেষ হবে |
-| 12 | **Replacement Rule** | Existing code-এর যে অংশ approved architecture-এর সাথে conflict করবে, শুধু সেই অংশ replace/refactor হবে; existing approved 1H/15m logic অযথা rewrite করা হবে না |
+# Rakibs Crypto Trade Bot
 
 ## Current Architecture
 
 ```text
-1H Scanner Engine
-→ Scan Pool
-→ 1H Trend
-→ 1H Quality
-→ Current Top 30
-
-15m Strategy Engine
-→ uses current Scanner Top30 only
-→ PASS / HOLD
-
-5m Signal Engine
-→ planned
-
-Trade Execution
+1H Scanner
+→ 15m Strategy
+→ 5m Entry
 → Risk Engine
-→ Position Engine
-→ Execution Engine
+→ Position Sizing
+→ Execution
 → Trade Management
 ```
 
-## Implemented / Fixed
+## Current Audit Status
 
-- ✅ Indicator Engine implemented.
-- ✅ 1H-only Binance USD-M Futures Scanner implemented.
-- ✅ Scanner ends at Top30; 15m/5m logic removed from Scanner ownership.
-- ✅ Manual Scanner button added.
-- ✅ Manual Scanner can run again in the same hour when Binance cooldown is clear.
-- ✅ Manual rerun may return the same symbols; same-symbol results are allowed.
-- ✅ UI changed from locked Top30 wording to current Top30 refresh behavior.
-- ✅ 15m Strategy Engine implemented with PASS/HOLD output.
-- ✅ Strategy Engine preserves Scanner LONG/SHORT bias and does not create its own symbol universe.
-- ✅ Strategy frontend proxy added.
-- ✅ Strategy Engine Working Log added.
-- ✅ Scanner latest state persistence support added through `DATABASE_URL` / PostgreSQL.
-- ✅ **Artificial 1-hour startup cooldown removed.**
-- ✅ Normal deploy/restart now starts with `blocked_until = 0`.
-- ✅ Real Binance HTTP 418/429 responses still activate dynamic Retry-After/backoff protection.
-- ✅ Trade Execution page exists in planning/safe mode; live order placement remains disabled.
+| No. | Module | Current | Next |
+| ---: | --- | --- | --- |
+| 1 | Market Data | Implemented | Improve reliability / freshness checks |
+| 2 | 1H Scanner | Implemented | Keep + harden |
+| 3 | 15m Strategy | Implemented | Keep + validate |
+| 4 | 5m Entry | Implemented | Keep + improve entry quality |
+| 5 | Risk Engine | Not implemented | **Build Next** |
+| 6 | Position Sizing | Not implemented | Build after Risk Engine |
+| 7 | SL / TP / RR | Not implemented | Build |
+| 8 | Execution Engine | Not implemented | Build for Demo/Paper trading first |
+| 9 | Trade Management | Not implemented | Build |
+| 10 | Tests / Security / CI | Partial | Improve |
 
-## Current Audit Findings
+## Existing Signal Flow
 
-| Priority | Finding | Status / Impact |
-| --- | --- | --- |
-| 🔴 Critical | `/api/scanner/run` and `/api/strategy/run` are public with no auth/rate-limit | Open — repeated calls can create Binance request pressure |
-| 🔴 High | Scanner has no `asyncio.Lock` | Open — Auto Scan + Manual Scan may overlap |
-| ✅ Fixed | Hardcoded 1-hour startup cooldown on every deploy | **Resolved** — removed; only real 418/429 creates cooldown |
-| 🟠 High | Manual Scanner refresh can cause Strategy to re-evaluate in the same 15m slot | Open — extra 15m API batch possible |
-| 🟠 Medium | Persistence currently focuses on latest Scanner result | Open — Strategy state/history is not durable yet |
-| 🟠 Medium | `.gitignore` is missing | Open — credential / local artifact commit risk |
-| 🟠 Medium | Automated tests are missing | Open — regressions can reach production |
-| 🟠 Medium | GitHub Actions / CI is missing | Open — build/type errors are not caught before deploy |
-| 🟡 Low | Some stale wording/docstrings still mention locked or multi-timeframe Scanner behavior | Open — documentation cleanup needed |
+The current working signal pipeline is:
 
-## Production Safety Notes
+**1H Scanner → Top 30 → 15m Strategy (PASS/HOLD) → 5m Entry (ENTRY/HOLD)**
 
-- Live trading is **not enabled**.
-- Binance API keys, secrets, and database credentials must never be committed to Git.
-- Scanner and Strategy use Binance public USD-M Futures market-data endpoints.
-- Real Binance 418/429 responses trigger backoff/cooldown protection.
-- Render Free may spin down during inactivity, so the service should not be treated as guaranteed 24/7 execution infrastructure.
+The existing 1H Scanner, 15m Strategy and 5m Entry engines should be preserved and improved rather than unnecessarily rewritten.
 
-## Development Rule
+## Key Audit Notes
+
+- Market data, indicator, scanner, strategy and entry foundations are already present.
+- Risk and execution directories do not yet contain real trading engines.
+- Full trade lifecycle, position sizing, SL/TP/RR and trade management still need to be built.
+- API security, concurrency protection, persistent logging and automated tests need further hardening.
+- Live trading remains disabled. Demo/Paper validation should come before any live execution.
+
+## Project Status
+
+**Estimated overall trading-bot completion: ~45%**
+
+### Next Development Step
+
+**Risk Engine**
 
 Build and validate one engine at a time:
 
 ```text
-Build engine
-→ inspect Engine Working Log
-→ validate/fix
-→ mark stable
-→ only then implement the next engine
+Build
+→ Test
+→ Validate / Fix
+→ Mark Stable
+→ Start Next Engine
 ```
